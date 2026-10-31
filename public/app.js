@@ -220,11 +220,28 @@ function bind() {
 }
 function navigate(next) { if (!Object.hasOwn(titles, next)) return; tab = next; history.replaceState(null, '', `${location.pathname}${location.search}#${next}`); render(); document.querySelector('#main-content').focus({ preventScroll: true }); window.scrollTo({ top: 0 }); }
 function leaveDemo() { const url = new URL(location.href); url.searchParams.delete('demo'); location.assign(url.href); }
+// GA4 reports its own token quota alongside each report; show what the backend already fetched.
+// The Data API serializes these int64 counters as strings, so parse before the strict numeric helpers.
+function quotaRows(data) {
+ const quota = data?.metadata?.propertyQuota;
+ if (!quota || typeof quota !== 'object') return '';
+ const finite = value => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; };
+ const cells = [['tokensPerHour', '近 1 小时'], ['tokensPerDay', '近 24 小时']].map(([key, label]) => {
+  const consumed = finite(quota[key]?.consumed), remaining = finite(quota[key]?.remaining);
+  if (consumed === null || remaining === null) return '';
+  return `<dd>${label}已用 ${number(consumed)} · 剩余 ${number(remaining)} tokens</dd>`;
+ }).join('');
+ return cells ? `<dt>GA4 配额</dt>${cells}` : '';
+}
+function comparisonRow(data) {
+ const period = data?.comparison?.window;
+ return period?.start && period?.end ? `<dt>环比参考期</dt><dd>${escape(period.start)} — ${escape(period.end)} · ${escape(period.timeZone || '时区未提供')}；上期缺失或为零的指标不显示涨跌</dd>` : '';
+}
 function showSource(id, returnTarget) {
  if (!Object.hasOwn(providers, id)) return;
  const provider = providers[id], data = source(id); drawerReturn = returnTarget;
  const overlay = document.createElement('div'); overlay.className = 'modal-backdrop';
- overlay.innerHTML = `<section class="drawer" role="dialog" aria-modal="true" aria-labelledby="source-title"><div class="drawer-header"><h2 id="source-title">${provider.name}</h2><button class="close-button" aria-label="关闭详情">✕</button></div>${sourceStatus(data)}<p>${escape(provider.description)}</p>${demo ? '<p class="drawer-note">这是布局预览。此处没有验证任何真实连接，也不会请求统计 API。</p>' : ''}<dl><dt>当前数据范围</dt><dd>${rangeText(data)}</dd><dt>最近同步</dt><dd>${escape(timestamp(data.fetchedAt))}${data.status === 'stale' ? ' · 缓存快照，最近读取失败' : ''}</dd><dt>连接说明</dt><dd>${escape(provider.setup)}</dd>${data.note ? `<dt>数据说明</dt><dd>${escape(data.note)}</dd>` : ''}${data.error ? `<dt>读取信息</dt><dd>${escape(data.error.message || '暂时无法读取')}${data.error.code ? `（${escape(data.error.code)}）` : ''}</dd>` : ''}</dl><p class="drawer-note">${id === 'ga4' ? '活跃用户、会话和事件各有自己的去重规则，不宜相互替代。未提供上期对比时不会显示涨跌幅。' : id === 'cloudflare' ? '访问次数和页面浏览保持 Cloudflare 原始口径，不推算独立用户。' : id === 'vercel' ? '通过 Vercel 官方统计 API 读取；Hobby 实际权限与额度由账户确认。' : '搜索查询可能被匿名化或省略。可见查询合计不一定等于报表总数。'}<br>不同平台的数据不会相加。缺失数据保持为空。</p><a href="${escape(provider.report)}" target="_blank" rel="noopener noreferrer">打开官方报表 <span aria-hidden="true">↗</span></a><a href="${escape(provider.help)}" target="_blank" rel="noopener noreferrer">阅读官方数据说明 <span aria-hidden="true">↗</span></a></section>`;
+ overlay.innerHTML = `<section class="drawer" role="dialog" aria-modal="true" aria-labelledby="source-title"><div class="drawer-header"><h2 id="source-title">${provider.name}</h2><button class="close-button" aria-label="关闭详情">✕</button></div>${sourceStatus(data)}<p>${escape(provider.description)}</p>${demo ? '<p class="drawer-note">这是布局预览。此处没有验证任何真实连接，也不会请求统计 API。</p>' : ''}<dl><dt>当前数据范围</dt><dd>${rangeText(data)}</dd>${comparisonRow(data)}<dt>最近同步</dt><dd>${escape(timestamp(data.fetchedAt))}${data.status === 'stale' ? ' · 缓存快照，最近读取失败' : ''}</dd>${quotaRows(data)}<dt>连接说明</dt><dd>${escape(provider.setup)}</dd>${data.note ? `<dt>数据说明</dt><dd>${escape(data.note)}</dd>` : ''}${data.error ? `<dt>读取信息</dt><dd>${escape(data.error.message || '暂时无法读取')}${data.error.code ? `（${escape(data.error.code)}）` : ''}</dd>` : ''}</dl><p class="drawer-note">${id === 'ga4' ? '活跃用户、会话和事件各有自己的去重规则，不宜相互替代。未提供上期对比时不会显示涨跌幅。' : id === 'cloudflare' ? '访问次数和页面浏览保持 Cloudflare 原始口径，不推算独立用户。' : id === 'vercel' ? '通过 Vercel 官方统计 API 读取；Hobby 实际权限与额度由账户确认。' : '搜索查询可能被匿名化或省略。可见查询合计不一定等于报表总数。'}<br>不同平台的数据不会相加。缺失数据保持为空。</p><a href="${escape(provider.report)}" target="_blank" rel="noopener noreferrer">打开官方报表 <span aria-hidden="true">↗</span></a><a href="${escape(provider.help)}" target="_blank" rel="noopener noreferrer">阅读官方数据说明 <span aria-hidden="true">↗</span></a></section>`;
  document.body.append(overlay); const closeButton = overlay.querySelector('button'); closeButton.focus();
  const close = () => { overlay.remove(); document.removeEventListener('keydown', keydown); drawerReturn?.focus(); };
  const keydown = event => { if (event.key === 'Escape') { event.preventDefault(); close(); } if (event.key === 'Tab') { const nodes = [...overlay.querySelectorAll('button,a[href]')]; const first = nodes[0], last = nodes.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } } };

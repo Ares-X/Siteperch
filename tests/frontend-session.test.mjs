@@ -137,3 +137,47 @@ test('metric deltas render only for comparable positive previous values',async()
   const sessions=app.innerHTML.match(/会话数<\/div><div class="metric-value">[^<]*<\/div><div class="metric-foot">([^<]*)/);
   assert.ok(sessions); assert.doesNotMatch(sessions[1],/▲|▼/);
 });
+
+test('source drawer exposes the comparison window and GA4 token quota',async()=>{
+  const elements=new Map();
+  const app={innerHTML:'',querySelectorAll:()=>[]};
+  const element=selector=>{
+    if(!elements.has(selector)) elements.set(selector,{disabled:false,listeners:{},addEventListener(event,handler){this.listeners[event]=handler;},focus(){}});
+    return elements.get(selector);
+  };
+  const overlays=[];
+  const fakeElement=()=>({className:'',innerHTML:'',querySelector:()=>({focus(){},addEventListener(){}}),addEventListener(){},remove(){}});
+  const context=vm.createContext({
+    URL,Intl,Date,console,
+    location:{href:'https://private.example/',hash:'',pathname:'/',search:''},
+    history:{replaceState(){}},window:{addEventListener(){}},
+    document:{
+      querySelector(selector){
+        if(selector==='#app') return app;
+        if(['#logout','#refresh'].includes(selector)) return element(selector);
+        return null;
+      },
+      createElement:()=>fakeElement(),
+      addEventListener(){},removeEventListener(){},
+      body:{append(overlay){overlays.push(overlay);}},
+    },
+    async fetch(url){
+      if(url==='/api/session') return response({configured:true,authenticated:true});
+      if(url.startsWith('/api/summary')) return response({site:'example.com',days:7,sources:{
+        ga4:{id:'ga4',status:'ok',metrics:{},
+             comparison:{window:{start:'2026-10-14',end:'2026-10-20',timeZone:'Asia/Shanghai'},metrics:{}},
+             metadata:{propertyQuota:{tokensPerHour:{consumed:'40',remaining:39121},tokensPerDay:{consumed:'500',remaining:142000}}}},
+      }});
+      throw Error(`Unexpected request ${url}`);
+    },
+  });
+  vm.runInContext(code,context);
+  await new Promise(resolve=>setImmediate(resolve));
+  vm.runInContext("showSource('ga4',{focus(){}})",context);
+  assert.equal(overlays.length,1);
+  assert.match(overlays[0].innerHTML,/环比参考期/);
+  assert.match(overlays[0].innerHTML,/2026-10-14 — 2026-10-20 · Asia\/Shanghai/);
+  assert.match(overlays[0].innerHTML,/GA4 配额/);
+  assert.match(overlays[0].innerHTML,/近 1 小时已用 40 · 剩余 39,121 tokens/);
+  assert.match(overlays[0].innerHTML,/近 24 小时已用 500 · 剩余 142,000 tokens/);
+});

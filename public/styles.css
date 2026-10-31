@@ -419,6 +419,37 @@ svg {
   stroke-width:1;
 }
 
+.chart:focus {
+  outline:2px solid var(--violet);
+  outline-offset:2px;
+  border-radius:4px;
+}
+
+.chart-hit {
+  fill:transparent;
+  pointer-events:all;
+  cursor:crosshair;
+}
+
+.chart-cursor {
+  stroke:#b7c1d6;
+  stroke-width:1;
+  stroke-dasharray:4 3;
+}
+
+.chart-focus {
+  stroke:#fff;
+  stroke-width:1.5;
+}
+
+.chart-readout {
+  font-size:11px;
+  color:#6b7a92;
+  min-height:16px;
+  margin:2px 0 6px;
+  font-variant-numeric:tabular-nums;
+}
+
 .chart-line {
   fill:none;
   stroke-width:2.5;

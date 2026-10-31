@@ -93,10 +93,12 @@ function chart(data, series) {
  const ceiling = Math.ceil(max / 6 / (10 ** Math.floor(Math.log10(max / 6)))) * (10 ** Math.floor(Math.log10(max / 6))) * 6;
  const x = index => left + plotW * (rows.length === 1 ? .5 : index / (rows.length - 1));
  const y = value => top + plotH * (1 - value / ceiling);
- let svg = `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escape(providers[data.id]?.name || '数据源')} 每日趋势；下方可查看每日数值"><defs><linearGradient id="chart-fill-purple" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6453ff" stop-opacity=".18"/><stop offset="100%" stop-color="#6453ff" stop-opacity=".015"/></linearGradient><linearGradient id="chart-fill-teal" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#14bfbf" stop-opacity=".14"/><stop offset="100%" stop-color="#14bfbf" stop-opacity=".015"/></linearGradient></defs>`;
+ let svg = `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" tabindex="0" data-series='${escape(JSON.stringify(series.map(s => s.label)))}' aria-label="${escape(providers[data.id]?.name || '数据源')} 每日趋势；可悬停或使用左右方向键逐日查看，下方可查看每日数值"><defs><linearGradient id="chart-fill-purple" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6453ff" stop-opacity=".18"/><stop offset="100%" stop-color="#6453ff" stop-opacity=".015"/></linearGradient><linearGradient id="chart-fill-teal" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#14bfbf" stop-opacity=".14"/><stop offset="100%" stop-color="#14bfbf" stop-opacity=".015"/></linearGradient></defs>`;
  for (let i = 0; i <= 6; i++) { const yy = y(ceiling * i / 6); svg += `<line class="chart-grid" x1="${left}" y1="${yy}" x2="${width - right}" y2="${yy}"/><text x="${left - 11}" y="${yy + 4}" text-anchor="end">${number(ceiling * i / 6)}</text>`; }
  const tickEvery = Math.max(1, Math.ceil((rows.length - 1) / 6));
  rows.forEach((row, i) => { if (i % tickEvery === 0 || i === rows.length - 1) svg += `<line class="chart-grid" x1="${x(i)}" y1="${top}" x2="${x(i)}" y2="${height - bottom}"/><text x="${x(i)}" y="${height - 8}" text-anchor="middle">${escape(row.date.slice(5))}</text>`; });
+ // Shared cursor line sits under the data series; per-day hit areas above them carry the values.
+ svg += `<line class="chart-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" visibility="hidden"/>`;
  for (const s of series) {
   const runs = []; let run = [];
   rows.forEach((row, index) => { if (numeric(row[s.key])) run.push({ index, value: row[s.key], date: row.date }); else if (run.length) { runs.push(run); run = []; } }); if (run.length) runs.push(run);
@@ -106,8 +108,53 @@ function chart(data, series) {
    if (rows.length <= 31) for (const p of points) svg += `<circle cx="${x(p.index)}" cy="${y(p.value)}" r="3.5" fill="${s.color === 'purple' ? '#6453ff' : '#14bfbf'}"><title>${escape(p.date)} · ${escape(s.label)} ${number(p.value)}</title></circle>`;
   }
  }
+ const step = rows.length > 1 ? plotW / (rows.length - 1) : plotW;
+ const hitX = i => Math.max(left, x(i) - step / 2), hitW = i => i === rows.length - 1 ? (width - right) - hitX(i) : Math.min(step, (width - right) - hitX(i));
+ rows.forEach((row, i) => { svg += `<rect class="chart-hit" x="${hitX(i).toFixed(1)}" y="${top}" width="${hitW(i).toFixed(1)}" height="${plotH}" data-date="${escape(row.date)}" data-values="${series.map(s => row[s.key] ?? '').join(',')}" data-x="${x(i).toFixed(1)}"${series.map((s, si) => numeric(row[s.key]) ? ` data-y${si}="${y(row[s.key]).toFixed(1)}"` : '').join('')}/>`; });
+ svg += series.map(s => `<circle class="chart-focus" r="5" fill="${s.color === 'purple' ? '#6453ff' : '#14bfbf'}" visibility="hidden"/>`).join('');
  svg += '</svg>';
- return `${svg}<details class="chart-note"><summary>查看每日数据</summary><div class="table-wrap"><table><thead><tr><th>日期</th>${series.map(s => `<th>${escape(s.label)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(row.date)}</td>${series.map(s => `<td>${number(row[s.key])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+ const hint = '悬停图表或使用左右方向键查看每日数值';
+ return `<div class="chart-box"><div class="chart-readout" data-hint="${hint}" aria-live="polite">${hint}</div>${svg}</div><details class="chart-note"><summary>查看每日数据</summary><div class="table-wrap"><table><thead><tr><th>日期</th>${series.map(s => `<th>${escape(s.label)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr><td>${escape(row.date)}</td>${series.map(s => `<td>${number(row[s.key])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+}
+// Hover and keyboard readout for a rendered chart. Hit rectangles carry the
+// day's values as data attributes, so no SVG text measuring is needed.
+function wireChart(svg, readout) {
+ const hits = svg.querySelectorAll('.chart-hit');
+ const cursor = svg.querySelector('.chart-cursor');
+ const focus = svg.querySelectorAll('.chart-focus');
+ const labels = JSON.parse(svg.getAttribute('data-series'));
+ let active = -1;
+ const hide = () => {
+  active = -1;
+  cursor.setAttribute('visibility', 'hidden');
+  focus.forEach(circle => circle.setAttribute('visibility', 'hidden'));
+  readout.textContent = readout.dataset.hint;
+ };
+ const show = index => {
+  const hit = hits[index];
+  if (!hit) { hide(); return; }
+  active = index;
+  const values = hit.dataset.values.split(',');
+  cursor.setAttribute('x1', hit.dataset.x); cursor.setAttribute('x2', hit.dataset.x); cursor.setAttribute('visibility', 'visible');
+  focus.forEach((circle, i) => {
+   if (hit.dataset['y' + i] !== undefined) { circle.setAttribute('cx', hit.dataset.x); circle.setAttribute('cy', hit.dataset['y' + i]); circle.setAttribute('visibility', 'visible'); }
+   else circle.setAttribute('visibility', 'hidden');
+  });
+  readout.textContent = `${hit.dataset.date} · ${labels.map((label, i) => `${label} ${values[i] === '' ? '—' : number(Number(values[i]))}`).join(' · ')}`;
+ };
+ hits.forEach((hit, index) => hit.addEventListener('pointerenter', () => show(index)));
+ svg.addEventListener('pointerleave', hide);
+ svg.addEventListener('focus', () => show(active < 0 ? hits.length - 1 : active));
+ svg.addEventListener('blur', hide);
+ svg.addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const last = hits.length - 1;
+  if (event.key === 'Home') return show(0);
+  if (event.key === 'End') return show(last);
+  const current = active < 0 ? last : active;
+  show(Math.max(0, Math.min(last, current + (event.key === 'ArrowRight' ? 1 : -1))));
+ });
 }
 function trafficCard() {
  const data = source(traffic);
@@ -201,6 +248,7 @@ function render() {
 }
 function bind() {
  app.querySelectorAll('[data-nav]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.nav)));
+ app.querySelectorAll('.chart-box').forEach(box => wireChart(box.querySelector('svg.chart'), box.querySelector('.chart-readout')));
  app.querySelectorAll('[data-days]').forEach(button => button.addEventListener('click', () => { days = Number(button.dataset.days); load(); }));
  app.querySelectorAll('[data-source]').forEach(button => button.addEventListener('click', () => showSource(button.dataset.source, button)));
  document.querySelector('#traffic-source')?.addEventListener('change', event => { traffic = event.target.value; render(); document.querySelector('#traffic-source')?.focus(); });

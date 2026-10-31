@@ -10,6 +10,7 @@ const deferred = () => { let resolve; const promise = new Promise(done => {resol
 
 async function dashboard(logoutResponse) {
   const pending = deferred();
+  let hashChange;
   let reads = 0;
   let logouts = 0;
   const elements = new Map();
@@ -21,7 +22,7 @@ async function dashboard(logoutResponse) {
   const context = vm.createContext({
     URL, Intl, Date, console,
     location:{href:'https://private.example/',hash:'',pathname:'/',search:''},
-    history:{replaceState(){}}, window:{addEventListener(){}},
+    history:{replaceState(){}}, window:{addEventListener(name,handler){if(name==='hashchange')hashChange=handler;}},
     document:{querySelector(selector){
       if(selector==='#app') return app;
       if(['#logout','#refresh'].includes(selector)) return element(selector);
@@ -40,7 +41,7 @@ async function dashboard(logoutResponse) {
   const loading = vm.runInContext('load()',context);
   assert.equal(reads,2);
   const logout = () => element('#logout').listeners.click({currentTarget:element('#logout')});
-  return {context,app,pending,loading,logout,reads:()=>reads};
+  return {context,app,pending,loading,logout,reads:()=>reads,changeHash(hash){context.location.hash=hash;hashChange();}};
 }
 
 test('a pending private summary cannot restore the dashboard after successful logout',async()=>{
@@ -67,4 +68,16 @@ test('failed logout allows a fresh refresh and retry; its old pending load remai
   assert.doesNotMatch(ui.app.innerHTML,/987,654/);
   await ui.logout();
   assert.match(ui.app.innerHTML,/访问你的观测台/);
+});
+
+test('revoking dashboard configuration clears prior private reports before hash navigation',async()=>{
+  const ui=await dashboard(()=>response({authenticated:false}));
+  ui.pending.resolve(response({configured:false},false,503));
+  await ui.loading;
+  assert.match(ui.app.innerHTML,/观测台尚未完成配置/);
+  assert.equal(vm.runInContext('summary',ui.context),undefined);
+  assert.equal(vm.runInContext('trafficInitialized',ui.context),false);
+  ui.changeHash('#sources');
+  assert.match(ui.app.innerHTML,/观测台尚未完成配置/);
+  assert.doesNotMatch(ui.app.innerHTML,/example\.com|101|数据源详情/);
 });

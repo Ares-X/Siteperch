@@ -292,6 +292,10 @@ svg {
   margin-bottom:18px;
 }
 
+.metric-strip.compact {
+  grid-template-columns:repeat(2,minmax(0,1fr));
+}
+
 .metric {
   padding:0 23px;
   border-right:1px solid var(--line);
@@ -439,6 +443,10 @@ svg {
   color:#929caf;
   margin:9px 0 0;
   line-height:1.65;
+}
+
+.report-quality {
+  overflow-wrap:anywhere;
 }
 
 .chart-controls {
@@ -600,6 +608,16 @@ tr:last-child td {
   align-items:center;
   gap:10px;
   font-size:12px;
+}
+
+.event-row>span:first-child {
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+
+.event-group-label {
+  font-size:12px;
+  margin:8px 0 0;
 }
 
 .event-row>span:last-child {
@@ -1155,6 +1173,9 @@ tr:last-child td {
   }
   .metric:nth-child(-n+2) {
     border-bottom:1px solid var(--line);
+  }
+  .metric-strip.compact .metric {
+    border-bottom:0;
   }
   .metric-value {
     font-size:34px;

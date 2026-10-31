@@ -41,13 +41,92 @@ test('no authorization means unconfigured and no network request',async()=>{
   assert.equal(result['search-console'].status,'unconfigured');
 });
 
+test('unused Google credentials do not cause token requests or configuration errors',async()=>{
+  for (const credentials of [config(),{googleServiceAccount:'fixture-unused-invalid-json'}]) {
+    let calls = 0;
+    const result = await readGoogle({...credentials,gaPropertyId:'',searchConsoleSite:''},{now,fetchImpl:async()=>{calls++; return response({},401);}});
+    assert.equal(calls,0);
+    assert.equal(result.ga4.status,'unconfigured');
+    assert.equal(result['search-console'].status,'unconfigured');
+    assert.equal(result.ga4.error,undefined);
+    assert.equal(result['search-console'].error,undefined);
+  }
+});
+
+test('token failures only affect the configured Google targets',async()=>{
+  for (const [gaEnabled,searchEnabled] of [[false,false],[true,false],[false,true],[true,true]]) {
+    const cfg = {...config(),gaPropertyId:gaEnabled ? '123456789' : '',searchConsoleSite:searchEnabled ? 'sc-domain:example.com' : ''};
+    const fixture = fixtureFetch(url=>url.endsWith('/token') ? response({error:'fixture-refresh'},401) : null);
+    const result = await readGoogle(cfg,{now,fetchImpl:fixture.fetchImpl});
+    assert.equal(fixture.calls.length,gaEnabled || searchEnabled ? 1 : 0);
+    assert.equal(result.ga4.status,gaEnabled ? 'error' : 'unconfigured');
+    assert.equal(result['search-console'].status,searchEnabled ? 'error' : 'unconfigured');
+    if (gaEnabled) assert.equal(result.ga4.error.code,'authorization');
+    if (searchEnabled) assert.equal(result['search-console'].error.code,'authorization');
+    assert.ok(!JSON.stringify(result).includes('fixture-refresh'));
+  }
+});
+
+test('single Google target fetches only its own reports',async()=>{
+  for (const id of ['ga4','search-console']) {
+    const cfg = {...config(),gaPropertyId:id === 'ga4' ? '123456789' : '',searchConsoleSite:id === 'search-console' ? 'sc-domain:example.com' : ''};
+    const fixture = fixtureFetch();
+    const result = await readGoogle(cfg,{now,fetchImpl:fixture.fetchImpl});
+    assert.equal(result[id].status,'ok');
+    assert.equal(result[id === 'ga4' ? 'search-console' : 'ga4'].status,'unconfigured');
+    const reports = fixture.calls.filter(call=>!call.url.endsWith('/token'));
+    assert.ok(reports.length > 0);
+    assert.ok(reports.every(call=>id === 'ga4' ? call.url.startsWith('https://analyticsdata.googleapis.com/') : call.url.startsWith('https://www.googleapis.com/webmasters/')));
+  }
+});
+
+test('generic events do not request the game-specific milestone dimension',async()=>{
+  for (const eventConfig of [undefined,{preset:'generic'}]) {
+    const fixture = fixtureFetch(url=>url.endsWith(':runReport') ? response({},400) : null);
+    const result = await readGoogle({...config(),eventConfig},{now,fetchImpl:fixture.fetchImpl});
+    assert.equal(result.ga4.status,'ok');
+    assert.equal(result.ga4.metadata.milestonesEnabled,false);
+    assert.deepEqual(result.ga4.milestones,[]);
+    assert.deepEqual(result.ga4.metadata.optionalErrors,{});
+    assert.deepEqual(result.ga4.events,[{name:'play_milestone',count:3}]);
+    assert.equal(fixture.calls.some(call=>call.url.endsWith(':runReport')),false);
+    assert.ok(!JSON.stringify(fixture.calls).includes('customEvent:threshold_seconds'));
+  }
+});
+
+test('realtime success, zero and failure stay distinct when historical reports are empty',async()=>{
+  const realtimeCases = [
+    {body:report([],['activeUsers'],[['9']]),status:200,count:9,reportStatus:'ok'},
+    {body:{kind:'analyticsData#runRealtimeReport'},status:200,count:0,reportStatus:'ok'},
+    {body:{},status:403,count:null,reportStatus:'error'},
+  ];
+  for (const realtime of realtimeCases) {
+    const fixture = fixtureFetch((url,options)=>{
+      if (url.endsWith(':batchRunReports')) {
+        return response({reports:JSON.parse(options.body).requests.map(request=>report(request.dimensions.map(item=>item.name),request.metrics.map(item=>item.name),[]))});
+      }
+      if (url.endsWith(':runRealtimeReport')) return response(realtime.body,realtime.status);
+      return null;
+    });
+    const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+    assert.equal(result.ga4.status,'empty');
+    assert.equal(result.ga4.metrics.activeUsers,null);
+    assert.equal(result.ga4.metrics.realtimeUsers,realtime.count);
+    assert.equal(result.ga4.metadata.realtimeStatus,realtime.reportStatus);
+    if (realtime.reportStatus === 'error') assert.equal(result.ga4.metadata.optionalErrors.realtime.code,'authorization');
+    else assert.equal(result.ga4.metadata.optionalErrors.realtime,undefined);
+  }
+});
+
 test('declared provider fixtures preserve distinct totals, zeroes and canonical request shapes',async()=>{
   const fixture = fixtureFetch();
-  const result = await readGoogle(config(),{now,days:90,fetchImpl:fixture.fetchImpl});
+  const result = await readGoogle({...config(),eventConfig:{preset:'lonelysky'}},{now,days:90,fetchImpl:fixture.fetchImpl});
   assert.equal(result.ga4.metrics.activeUsers,8);
   assert.equal(result.ga4.daily[0].activeUsers,7);
   assert.equal(result.ga4.metrics.engagementRate,0);
   assert.equal(result.ga4.metrics.realtimeUsers,0);
+  assert.equal(result.ga4.metadata.realtimeStatus,'ok');
+  assert.equal(result.ga4.metadata.milestonesEnabled,true);
   assert.deepEqual(result.ga4.milestones,[{seconds:60,count:2}]);
   assert.equal(result.ga4.range.timeZone,'Asia/Shanghai');
   assert.equal(result.ga4.range.start,'2026-09-30');
@@ -80,10 +159,11 @@ test('GA quota failure does not suppress Search Console',async()=>{
 
 test('optional realtime, milestone and sitemap errors remain visible without losing core data',async()=>{
   const fixture = fixtureFetch(url=>url.endsWith(':runRealtimeReport') || url.endsWith(':runReport') || url.endsWith('/sitemaps') ? response({},403) : null);
-  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  const result = await readGoogle({...config(),eventConfig:{preset:'lonelysky'}},{now,fetchImpl:fixture.fetchImpl});
   assert.equal(result.ga4.status,'ok');
   assert.equal(result.ga4.metrics.activeUsers,8);
   assert.equal(result.ga4.metrics.realtimeUsers,null);
+  assert.equal(result.ga4.metadata.realtimeStatus,'error');
   assert.equal(result.ga4.metadata.optionalErrors.milestones.code,'authorization');
   assert.equal(result['search-console'].status,'ok');
   assert.equal(result['search-console'].metadata.optionalErrors.sitemaps.code,'authorization');
@@ -155,9 +235,10 @@ test('Search Console authorization failure leaves GA4 valid and reports safe err
 });
 
 test('invalid service-account JSON cannot fetch or expose configuration contents',async()=>{
-  const result = await readGoogle({googleServiceAccount:'fixture-private-invalid-json'},{now,fetchImpl:()=>{throw new Error('must not fetch');}});
+  const result = await readGoogle({gaPropertyId:'123456789',googleServiceAccount:'fixture-private-invalid-json'},{now,fetchImpl:()=>{throw new Error('must not fetch');}});
   assert.equal(result.ga4.status,'error');
   assert.equal(result.ga4.error.code,'configuration');
+  assert.equal(result['search-console'].status,'unconfigured');
   assert.ok(!JSON.stringify(result).includes('fixture-private-invalid-json'));
 });
 

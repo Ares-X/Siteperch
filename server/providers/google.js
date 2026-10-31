@@ -66,6 +66,7 @@ const totalsFrom = report => {
 
 async function readGA(config, token, options) {
   const {days,now,fetchImpl} = options;
+  const milestonesEnabled = config.eventConfig?.preset === 'lonelysky';
   const post = (suffix,body) => requestJSON(`${gaURL(config.gaPropertyId)}:${suffix}`,{fetchImpl,method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const ranges = [{startDate:`${days-1}daysAgo`,endDate:'today'}];
   const report = (dimensions,metrics,extra={}) => ({dateRanges:ranges,dimensions:dimensions.map(name=>({name})),metrics:metrics.map(name=>({name})),returnPropertyQuota:true,...extra});
@@ -79,7 +80,7 @@ async function readGA(config, token, options) {
   const [core,realtime,milestones] = await Promise.allSettled([
     post('batchRunReports',{requests}),
     post('runRealtimeReport',{metrics:[{name:'activeUsers'}],returnPropertyQuota:true}),
-    post('runReport',report(['customEvent:threshold_seconds'],['eventCount'],{dimensionFilter:{filter:{fieldName:'eventName',stringFilter:{matchType:'EXACT',value:'play_milestone'}}},limit:'100'})),
+    ...(milestonesEnabled ? [post('runReport',report(['customEvent:threshold_seconds'],['eventCount'],{dimensionFilter:{filter:{fieldName:'eventName',stringFilter:{matchType:'EXACT',value:'play_milestone'}}},limit:'100'}))] : []),
   ]);
   if (core.status === 'rejected') throw core.reason;
   const reports = core.value.reports;
@@ -88,7 +89,7 @@ async function readGA(config, token, options) {
   const metrics = totalsFrom(total);
   const optionalErrors = {};
   let realtimeUsers = null, milestoneRows = [];
-  for (const [key,result] of [['realtime',realtime],['milestones',milestones]]) {
+  for (const [key,result] of [['realtime',realtime],...(milestonesEnabled ? [['milestones',milestones]] : [])]) {
     try {
       if (result.status === 'rejected') throw result.reason;
       if (key === 'realtime') realtimeUsers = realtimeUserCount(result.value);
@@ -104,8 +105,8 @@ async function readGA(config, token, options) {
     channels:reportRows(channels).map(row=>({name:row.dimensions.sessionDefaultChannelGroup,sessions:row.metrics.sessions})),
     events:reportRows(events).map(row=>({name:row.dimensions.eventName,count:row.metrics.eventCount})),
     milestones:milestoneRows.map(row=>({seconds:numeric(row.dimensions['customEvent:threshold_seconds']),count:row.metrics.eventCount})).filter(row=>row.seconds !== null),
-    queries:[],note:`按媒体资源时区统计，包含今天；今日数据尚不完整，近两日数据仍可能调整。${Object.keys(optionalErrors).length ? '部分实时或游玩时长报表暂不可用，核心报表仍可读取。' : ''}`,
-    metadata:{reports:reports.map(report=>report.metadata || {}),propertyQuota:total.propertyQuota || null,optionalErrors,realtimeWindowMinutes:30,timezoneConfirmed:Boolean(total.metadata?.timeZone)},
+    queries:[],note:`按媒体资源时区统计，包含今天；今日数据尚不完整，近两日数据仍可能调整。${Object.keys(optionalErrors).length ? '部分附加报表暂不可用，核心报表仍可读取。' : ''}`,
+    metadata:{reports:reports.map(report=>report.metadata || {}),propertyQuota:total.propertyQuota || null,optionalErrors,realtimeStatus:optionalErrors.realtime ? 'error' : 'ok',realtimeWindowMinutes:30,milestonesEnabled,timezoneConfirmed:Boolean(total.metadata?.timeZone)},
   };
 }
 
@@ -133,12 +134,28 @@ async function readSearch(config,token,{days,now,fetchImpl}) {
 
 export async function readGoogle(config,{days=7,now=new Date(),fetchImpl=fetch}={}) {
   days = Math.max(1,Math.min(28,Math.trunc(Number(days)) || 7));
+  const sources = {ga4:unconfigured('ga4','Google Analytics 4','尚未配置媒体资源。'),'search-console':unconfigured('search-console','Google Search Console','尚未配置站点资源。')};
+  const targets = [
+    ['ga4','Google Analytics 4',config.gaPropertyId,readGA],
+    ['search-console','Google Search Console',config.searchConsoleSite,readSearch],
+  ].filter(([, ,resource])=>resource);
+  if (!targets.length) return sources;
   const available = config.googleServiceAccount || (config.googleClientId && config.googleClientSecret && config.googleRefreshToken);
-  if (!available) return {ga4:unconfigured('ga4','Google Analytics 4','尚未配置 Google 只读授权。'),'search-console':unconfigured('search-console','Google Search Console','尚未配置 Google 只读授权。')};
+  if (!available) {
+    for (const [id,name] of targets) sources[id] = unconfigured(id,name,'尚未配置 Google 只读授权。');
+    return sources;
+  }
   let token;
   try { token = await accessToken(config,fetchImpl); }
-  catch(error) { return {ga4:providerFailure('ga4','Google Analytics 4',error,now),'search-console':providerFailure('search-console','Google Search Console',error,now)}; }
+  catch(error) {
+    for (const [id,name] of targets) sources[id] = providerFailure(id,name,error,now);
+    return sources;
+  }
   const options = {days,now,fetchImpl};
-  const results = await Promise.allSettled([config.gaPropertyId ? readGA(config,token,options) : Promise.resolve(unconfigured('ga4','Google Analytics 4','尚未配置媒体资源。')),config.searchConsoleSite ? readSearch(config,token,options) : Promise.resolve(unconfigured('search-console','Google Search Console','尚未配置站点资源。'))]);
-  return Object.fromEntries(results.map((result,index)=>[index ? 'search-console' : 'ga4',result.status === 'fulfilled' ? result.value : providerFailure(index ? 'search-console' : 'ga4',index ? 'Google Search Console' : 'Google Analytics 4',result.reason,now)]));
+  const results = await Promise.allSettled(targets.map(([, , ,read])=>read(config,token,options)));
+  results.forEach((result,index)=>{
+    const [id,name] = targets[index];
+    sources[id] = result.status === 'fulfilled' ? result.value : providerFailure(id,name,result.reason,now);
+  });
+  return sources;
 }

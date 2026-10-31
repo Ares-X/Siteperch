@@ -6,6 +6,30 @@ const SECURITY_HEADERS={
   'Referrer-Policy':'no-referrer','Vary':'Cookie',
 };
 function json(value,status=200,headers={}) { return new Response(JSON.stringify(value),{status,headers:{...SECURITY_HEADERS,...headers}}); }
+class LoginBodyTooLarge extends Error {}
+async function readLoginBody(request) {
+  const limit=2048, reader=request.body?.getReader();
+  if (!reader) throw new SyntaxError('Missing JSON body');
+  const rejectLargeBody=()=>{
+    // Cancellation can be asynchronous; the response must not wait for the sender.
+    void reader.cancel().catch(()=>{});
+    throw new LoginBodyTooLarge();
+  };
+  try {
+    const declared=request.headers.get('content-length');
+    if (declared && /^\d+$/.test(declared) && Number(declared)>limit) rejectLargeBody();
+    const bytes=new Uint8Array(limit);
+    let length=0;
+    while (true) {
+      const {done,value}=await reader.read();
+      if (done) break;
+      if (length+value.byteLength>limit) rejectLargeBody();
+      bytes.set(value,length);
+      length+=value.byteLength;
+    }
+    return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,length)));
+  } finally { reader.releaseLock(); }
+}
 export function createHandler(env, {now=()=>new Date(),dashboard,fetchImpl} = {}) {
   const reports=dashboard || createDashboard(env,{now,fetchImpl});
   return async function handle(request) {
@@ -20,8 +44,8 @@ export function createHandler(env, {now=()=>new Date(),dashboard,fetchImpl} = {}
     if (path==='/api/login') {
       if (!request.headers.get('content-type')?.startsWith('application/json')) return json({error:'请使用 JSON 提交口令。'},415);
       let body;
-      try { const text=await request.text(); if(text.length>2048)return json({error:'请求过大。'},413); body=JSON.parse(text); }
-      catch { return json({error:'无法读取登录请求。'},400); }
+      try { body=await readLoginBody(request); }
+      catch (error) { return error instanceof LoginBodyTooLarge ? json({error:'请求过大。'},413) : json({error:'无法读取登录请求。'},400); }
       if(!await passwordMatches(body?.password,env)) return json({error:'访问口令不正确。'},401);
       return json({authenticated:true},200,{'Set-Cookie':await sessionCookie(request,env,now())});
     }

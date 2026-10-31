@@ -66,11 +66,28 @@ export async function readCloudflare(config,{days=7,now=new Date(),fetchImpl=fet
       return [key,account.rows.slice(0,10).map(row=>({[key === 'pages' ? 'path' : 'name']:row.dimensions[dimension],views:numeric(row.count)}))];
     }));
     detailResults.forEach((result,index)=>{const key=Object.keys(detailDimensions)[index]; if(result.status === 'fulfilled') details[key]=result.value[1]; else {details[key]=[]; optionalErrors[key]=safeError(result.reason);}});
+    // Compare only against a fully retained previous window; a partial one
+    // would fabricate a trend that retention cannot support.
+    const previousWindow = {start:shiftDate(requestedRange.start,-days),end:shiftDate(requestedRange.start,-1)};
+    let comparison = null;
+    if (previousWindow.start >= oldest) {
+      try {
+        let previousViews = 0, previousVisits = 0;
+        for (let start=previousWindow.start; start<=previousWindow.end; start=shiftDate(start,chunkDays)) {
+          const end = [shiftDate(start,chunkDays-1),previousWindow.end].sort()[0];
+          const account = await graphql(`total: ${dataset}(limit:1,filter:${filter(start,end)}) { ${metricsFields} }`);
+          if (!Array.isArray(account.total) || account.total.length > 1) throw new ProviderError('response','Cloudflare 返回的对比汇总结构不完整。');
+          for (const row of account.total) if (numeric(row.count) === null || numeric(row.sum?.visits) === null) throw new ProviderError('response','Cloudflare 返回的对比指标无法读取。');
+          previousViews += numeric(account.total[0]?.count) ?? 0; previousVisits += numeric(account.total[0]?.sum?.visits) ?? 0;
+        }
+        comparison = {window:{...previousWindow,timeZone:'UTC'},metrics:{pageViews:previousViews,visits:previousVisits}};
+      } catch (error) { optionalErrors.comparison = safeError(error); }
+    }
     const coverageLimited = range.start !== requestedRange.start;
     const observedIntervals = [...new Set(sampleIntervals)];
     const samplingObserved = observedIntervals.length > 0 ? observedIntervals.some(value=>value>1) : null;
-    return {id,name,status:daily.length ? 'ok' : 'empty',fetchedAt:now.toISOString(),range,metrics:{pageViews:daily.length ? pageViews : null,visits:daily.length ? visits : null},daily:daily.sort((a,b)=>a.date.localeCompare(b.date)),...details,queries:[],
-      note:`按 UTC 自然日统计，包含今天截至读取时的数据，今日数据仍会变化。浏览器 RUM；visits 是访问次数，不是去重访客。${samplingObserved ? `本次已观察到抽样（采样间隔 ${observedIntervals.join(' / ')}），数值为估计值，不同日期范围的估计结果不保证严格可加。` : '数据可能采样。'}拦截或未执行脚本的访问不会出现。${coverageLimited ? '保留期限缩短了实际显示期间。' : ''}${Object.keys(optionalErrors).length ? '部分维度因查询能力或读取失败暂不可用。' : ''}`,
+    return {id,name,status:daily.length ? 'ok' : 'empty',fetchedAt:now.toISOString(),range,comparison,metrics:{pageViews:daily.length ? pageViews : null,visits:daily.length ? visits : null},daily:daily.sort((a,b)=>a.date.localeCompare(b.date)),...details,queries:[],
+      note:`按 UTC 自然日统计，包含今天截至读取时的数据，今日数据仍会变化。浏览器 RUM；visits 是访问次数，不是去重访客。${samplingObserved ? `本次已观察到抽样（采样间隔 ${observedIntervals.join(' / ')}），数值为估计值，不同日期范围的估计结果不保证严格可加。` : '数据可能采样。'}拦截或未执行脚本的访问不会出现。${coverageLimited ? '保留期限缩短了实际显示期间。' : ''}${!comparison && previousWindow.start < oldest ? '上一期间超出保留期限，不显示环比。' : ''}${Object.keys(optionalErrors).length ? '部分维度因查询能力或读取失败暂不可用。' : ''}`,
       metadata:{requestedRange,coverageLimited,optionalErrors,topRowsOnly:true,sampling:'adaptive',sampleIntervals:observedIntervals,samplingObserved,limits:{maxDuration,notOlderThan,maxPageSize},includesPartialToday:true,dataThrough:now.toISOString()}};
   } catch(error) { return providerFailure(id,name,error,now); }
 }

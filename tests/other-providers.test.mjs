@@ -22,16 +22,21 @@ test('Vercel reads period-distinct visitors from a unique production group',asyn
     assert.equal(url.searchParams.get('projectId'),'project');
     assert.equal(url.searchParams.get('teamId'),'team');
     assert.equal(url.searchParams.get('filter'),"environment eq 'production'");
-    assert.equal(url.searchParams.get('since'),'2026-10-21T00:00:00.000Z');
-    assert.equal(url.searchParams.get('until'),now.toISOString());
+    const since = url.searchParams.get('since');
+    if (since === '2026-10-21T00:00:00.000Z') assert.equal(url.searchParams.get('until'),now.toISOString());
     const by = url.searchParams.get('by');
-    if (by === 'environment') return json({data:[{environment:'production',pageviews:20,visitors:5}]});
+    if (by === 'environment') {
+      const previous = since === '2026-10-14T00:00:00.000Z';
+      if (previous) assert.equal(url.searchParams.get('until'),'2026-10-20T23:59:59.999Z');
+      return json({data:[{environment:'production',pageviews:previous ? 10 : 20,visitors:previous ? 2 : 5}]});
+    }
     if (by === 'day') return json({data:[{timestamp:'2026-10-21T00:00:00Z',pageviews:10,visitors:4},{timestamp:'2026-10-27T00:00:00Z',pageviews:10,visitors:4}]});
     return json({data:[{[by]:by === 'requestPath' ? '/' : 'value',pageviews:20,visitors:5}]});
   }});
-  assert.equal(requests.length,6);
+  assert.equal(requests.length,7);
   assert.equal(result.metrics.visitors,5); assert.equal(result.daily.reduce((sum,row)=>sum+row.visitors,0),8);
   assert.equal(result.metrics.pageViews,20); assert.equal(result.pages[0].path,'/');
+  assert.deepEqual(result.comparison,{window:{start:'2026-10-14',end:'2026-10-20',timeZone:'UTC'},metrics:{pageViews:10,visitors:2}});
   assert.equal(result.status,'ok'); assert.equal(result.range.timeZone,'UTC');
   assert.equal(result.daily.at(-1).date,'2026-10-27'); assert.equal(result.metadata.includesPartialToday,true);
 });
@@ -79,6 +84,7 @@ test('Bing filters dated rows and preserves traffic despite optional failures',a
     return json({d:[{Url:'https://example.com/sitemap.xml',Status:'Success',Type:'Sitemap',LastCrawled:bingStamp('2026-10-26'),UrlCount:2,PrivateProperty:'must not escape'}]});
   }});
   assert.equal(result.status,'ok'); assert.equal(result.metrics.clicks,3); assert.equal(result.metrics.impressions,30); assert.equal(result.metrics.ctr,.1);
+  assert.deepEqual(result.comparison,{window:{start:'2026-10-13',end:'2026-10-19',timeZone:'Bing reported date'},metrics:{clicks:500,impressions:1000,ctr:.5,position:null}});
   assert.equal(result.pages[0].position,4); assert.equal(result.sitemaps[0].status,'Success');
   assert.equal(result.metadata.optionalErrors.GetQueryStats.code,'network');
   assert.ok(!JSON.stringify(result).includes('secret-bing')); assert.ok(!JSON.stringify(result).includes('must not escape'));
@@ -103,6 +109,7 @@ test('Cloudflare discovers settings and separates visits from unique visitors',a
     return cfResponse({rows:[{count:12,dimensions:{[dimension]:dimension === 'requestPath' ? '/' : 'value'}}]});
   }});
   assert.equal(result.status,'ok'); assert.deepEqual(result.metrics,{pageViews:12,visits:6});
+  assert.deepEqual(result.comparison,{window:{start:'2026-10-14',end:'2026-10-20',timeZone:'UTC'},metrics:{pageViews:12,visits:6}});
   assert.equal(result.metadata.samplingObserved,true); assert.equal(result.pages[0].path,'/');
   assert.ok(queries[1].includes('siteTag:"site"')); assert.ok(queries[1].includes('datetime_geq:"2026-10-21T00:00:00Z"')); assert.ok(queries[1].includes(`datetime_lt:"${now.toISOString()}"`));
   assert.equal(result.daily[0].date,'2026-10-27'); assert.equal(result.metadata.includesPartialToday,true);
@@ -121,8 +128,10 @@ test('Cloudflare chunks within maxDuration and never merges truncated detail ran
     assert.ok(Date.parse(upper)<=now.getTime()); bounds.push({start,upper});
     return cfResponse({total:[{count:1,sum:{visits:1}}],daily:[{count:1,sum:{visits:1},dimensions:{date:start}}]});
   }});
-  assert.equal(chunks,4); assert.equal(result.metrics.pageViews,4); assert.deepEqual(result.pages,[]); assert.equal(result.metadata.optionalErrors.pages.code,'coverage');
-  assert.equal(bounds[0].upper,'2026-10-23T00:00:00.000Z'); assert.equal(bounds.at(-1).upper,now.toISOString());
+  assert.equal(chunks,8); assert.equal(result.metrics.pageViews,4); assert.deepEqual(result.pages,[]); assert.equal(result.metadata.optionalErrors.pages.code,'coverage');
+  assert.equal(bounds[0].upper,'2026-10-23T00:00:00.000Z'); assert.equal(bounds[3].upper,now.toISOString());
+  assert.deepEqual(result.comparison,{window:{start:'2026-10-14',end:'2026-10-20',timeZone:'UTC'},metrics:{pageViews:4,visits:4}});
+  assert.equal(bounds.at(-1).upper,'2026-10-21T00:00:00.000Z');
 });
 
 test('Cloudflare retention cannot silently claim the full selected period',async()=>{
@@ -133,6 +142,7 @@ test('Cloudflare retention cannot silently claim the full selected period',async
     return cfResponse({rows:[]});
   }});
   assert.equal(result.range.start,'2026-10-25'); assert.equal(result.metadata.coverageLimited,true); assert.equal(result.status,'empty');
+  assert.equal(result.comparison,null);
 });
 
 test('Cloudflare omits unadvertised sample and detail fields while preserving zero',async()=>{

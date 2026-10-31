@@ -322,12 +322,12 @@ svg {
   line-height:1.6;
 }
 
-.metric-foot .positive {
+.metric-foot .positive,.delta.positive {
   color:#0caf93;
   font-size:12px;
 }
 
-.metric-foot .negative {
+.metric-foot .negative,.delta.negative {
   color:#ec626c;
   font-size:12px;
 }
@@ -1097,7 +1097,7 @@ tr:last-child td {
   .metric-foot {
     font-size:9px;
   }
-  .metric-foot .positive,.metric-foot .negative {
+  .metric-foot .positive,.metric-foot .negative,.delta.positive,.delta.negative {
     font-size:10px;
   }
   .banner {

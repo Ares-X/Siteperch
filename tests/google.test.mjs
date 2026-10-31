@@ -17,7 +17,7 @@ function fixtureFetch(override = () => null) {
     if (custom) return custom;
     if (url.endsWith('/token')) return response({access_token:'fixture-provider-access-token',expires_in:3600});
     if (url.endsWith(':batchRunReports')) return response({reports:[
-      report([],['activeUsers','newUsers','sessions','screenPageViews','engagementRate'],[['8','3','12','18','0']]),
+      report(['dateRangeIndex'],['activeUsers','newUsers','sessions','screenPageViews','engagementRate'],[['8','3','12','18','0'],['7','2','10','15','0.1']],[['0'],['1']]),
       report(['date'],['activeUsers','screenPageViews'],[['7','10'],['6','8']],[['20261025'],['20261026']]),
       report(['pagePath'],['screenPageViews'],[['18']],[['/']]),
       report(['sessionDefaultChannelGroup'],['sessions'],[['12']],[['Direct']]),
@@ -61,10 +61,19 @@ test('declared provider fixtures preserve distinct totals, zeroes and canonical 
   assert.deepEqual(batch.requests[0].dimensions,[]);
   assert.equal(batch.requests[1].dateRanges[0].startDate,'27daysAgo');
   assert.ok(batch.requests.every(request=>request.dateRanges[0].endDate === 'today'));
+  assert.deepEqual(result.ga4.comparison.window,{start:'2026-09-02',end:'2026-09-29',timeZone:'Asia/Shanghai'});
+  assert.equal(result.ga4.comparison.metrics.activeUsers,7);
+  assert.equal(result.ga4.comparison.metrics.pageViews,15);
+  assert.equal(result.ga4.comparison.metrics.engagementRate,0.1);
   const searchCalls = fixture.calls.filter(call=>call.url.endsWith('/searchAnalytics/query'));
-  assert.equal(searchCalls.length,4);
+  assert.equal(searchCalls.length,5);
   assert.ok(searchCalls.every(call=>call.url.includes('sc-domain%3Aexample.com') && call.body.dataState === 'final'));
   assert.equal(searchCalls.find(call=>call.body.dimensions[0] === 'query').body.rowLimit,10);
+  const comparisonCall = searchCalls.find(call=>call.body.startDate === '2026-08-29');
+  assert.equal(comparisonCall.body.endDate,'2026-09-25');
+  assert.equal(result['search-console'].comparison.window.start,'2026-08-29');
+  assert.equal(result['search-console'].comparison.metrics.clicks,0);
+  assert.equal(result['search-console'].comparison.metrics.impressions,10);
   assert.ok(!JSON.stringify(result).includes('fixture-provider-access-token'));
   assert.ok(!JSON.stringify(result).includes('fixture-secret'));
 });
@@ -166,8 +175,9 @@ test('seven-day traffic report includes today in the property timezone while sea
   const fixture = fixtureFetch();
   const result = await readGoogle(config(),{now:new Date('2026-10-26T17:00:00Z'),days:7,fetchImpl:fixture.fetchImpl});
   const batch = fixture.calls.find(call=>call.url.endsWith(':batchRunReports')).body;
-  assert.deepEqual(batch.requests[0].dateRanges,[{startDate:'6daysAgo',endDate:'today'}]);
+  assert.deepEqual(batch.requests[0].dateRanges,[{startDate:'6daysAgo',endDate:'today'},{startDate:'13daysAgo',endDate:'7daysAgo'}]);
   assert.deepEqual(result.ga4.range,{start:'2026-10-21',end:'2026-10-27',timeZone:'Asia/Shanghai'});
+  assert.deepEqual(result.ga4.comparison.window,{start:'2026-10-14',end:'2026-10-20',timeZone:'Asia/Shanghai'});
   assert.equal(result['search-console'].range.end,'2026-10-23');
 });
 

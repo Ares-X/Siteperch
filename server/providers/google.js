@@ -1,4 +1,4 @@
-import {ProviderError, requestJSON, numeric, dateRange, unconfigured, providerFailure} from '../common.js';
+import {ProviderError, requestJSON, numeric, dateRange, shiftDate, unconfigured, providerFailure} from '../common.js';
 
 const SCOPES = 'https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/webmasters.readonly';
 const tokenCache = new Map();
@@ -59,10 +59,10 @@ function realtimeUserCount(report) {
 }
 const gaURL = id => `https://analyticsdata.googleapis.com/v1beta/properties/${encodeURIComponent(id)}`;
 const gaMetricNames = ['activeUsers','newUsers','sessions','screenPageViews','engagementRate'];
-const totalsFrom = report => {
-  const rows = reportRows(report);
-  return Object.fromEntries(gaMetricNames.map(name => [name === 'screenPageViews' ? 'pageViews' : name,rows[0]?.metrics[name] ?? null]));
-};
+// With two dateRanges GA4 stamps each row with a dateRangeIndex dimension; without
+// it every row belongs to the requested single range.
+const totalsRow = (report,index) => reportRows(report).find(row => (row.dimensions.dateRangeIndex ?? String(index)) === String(index));
+const metricsFrom = row => Object.fromEntries(gaMetricNames.map(name => [name === 'screenPageViews' ? 'pageViews' : name,row?.metrics[name] ?? null]));
 
 async function readGA(config, token, options) {
   const {days,now,fetchImpl} = options;
@@ -70,7 +70,9 @@ async function readGA(config, token, options) {
   const ranges = [{startDate:`${days-1}daysAgo`,endDate:'today'}];
   const report = (dimensions,metrics,extra={}) => ({dateRanges:ranges,dimensions:dimensions.map(name=>({name})),metrics:metrics.map(name=>({name})),returnPropertyQuota:true,...extra});
   const requests = [
-    report([],gaMetricNames),
+    // The comparison period rides in the same batch call: one extra dateRange
+    // instead of one extra request, so period deltas cost no extra quota.
+    report([],gaMetricNames,{dateRanges:[...ranges,{startDate:`${2*days-1}daysAgo`,endDate:`${days}daysAgo`}]}),
     report(['date'],['activeUsers','screenPageViews'],{orderBys:[{dimension:{dimensionName:'date'}}],limit:'28'}),
     report(['pagePath'],['screenPageViews'],{orderBys:[{metric:{metricName:'screenPageViews'},desc:true}],limit:'10'}),
     report(['sessionDefaultChannelGroup'],['sessions'],{orderBys:[{metric:{metricName:'sessions'},desc:true}],limit:'10'}),
@@ -85,7 +87,7 @@ async function readGA(config, token, options) {
   const reports = core.value.reports;
   if (!Array.isArray(reports) || reports.length !== 5) throw new ProviderError('response','Google 返回的报表结构不完整。');
   const [total,daily,pages,channels,events] = reports;
-  const metrics = totalsFrom(total);
+  const metrics = metricsFrom(totalsRow(total,0));
   const optionalErrors = {};
   let realtimeUsers = null, milestoneRows = [];
   for (const [key,result] of [['realtime',realtime],['milestones',milestones]]) {
@@ -97,8 +99,10 @@ async function readGA(config, token, options) {
   }
   metrics.realtimeUsers = realtimeUsers;
   const timeZone = total.metadata?.timeZone || 'UTC';
+  const range = dateRange(days,now,timeZone,0);
+  const comparison = {window:{start:shiftDate(range.start,-days),end:shiftDate(range.end,-days),timeZone},metrics:metricsFrom(totalsRow(total,1))};
   return {
-    id:'ga4',name:'Google Analytics 4',status:reportRows(total).length ? 'ok' : 'empty',fetchedAt:now.toISOString(),range:dateRange(days,now,timeZone,0),metrics,
+    id:'ga4',name:'Google Analytics 4',status:reportRows(total).length ? 'ok' : 'empty',fetchedAt:now.toISOString(),range,comparison,metrics,
     daily:reportRows(daily).map(row=>({date:row.dimensions.date.replace(/^(\d{4})(\d{2})(\d{2})$/,'$1-$2-$3'),activeUsers:row.metrics.activeUsers,pageViews:row.metrics.screenPageViews})),
     pages:reportRows(pages).map(row=>({path:row.dimensions.pagePath,views:row.metrics.screenPageViews})),
     channels:reportRows(channels).map(row=>({name:row.dimensions.sessionDefaultChannelGroup,sessions:row.metrics.sessions})),
@@ -111,18 +115,21 @@ async function readGA(config, token, options) {
 
 async function readSearch(config,token,{days,now,fetchImpl}) {
   const range = dateRange(days,now,'America/Los_Angeles',3);
+  const previous = {start:shiftDate(range.start,-days),end:shiftDate(range.end,-days)};
   const root = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(config.searchConsoleSite)}`;
   const headers = {Authorization:`Bearer ${token}`,'Content-Type':'application/json'};
-  const query = (dimensions,extra={}) => requestJSON(`${root}/searchAnalytics/query`,{fetchImpl,method:'POST',headers,body:JSON.stringify({startDate:range.start,endDate:range.end,type:'web',dataState:'final',dimensions,rowLimit:dimensions.includes('date') ? 28 : 10,...extra})});
-  const results = await Promise.allSettled([query([],{aggregationType:'byProperty'}),query(['date'],{aggregationType:'byProperty'}),query(['query'],{aggregationType:'byProperty'}),query(['page']),requestJSON(`${root}/sitemaps`,{fetchImpl,headers})]);
-  const names = ['totals','daily','queries','pages','sitemaps'];
+  const query = (dimensions,extra={},window=range) => requestJSON(`${root}/searchAnalytics/query`,{fetchImpl,method:'POST',headers,body:JSON.stringify({startDate:window.start,endDate:window.end,type:'web',dataState:'final',dimensions,rowLimit:dimensions.includes('date') ? 28 : 10,...extra})});
+  const results = await Promise.allSettled([query([],{aggregationType:'byProperty'}),query(['date'],{aggregationType:'byProperty'}),query(['query'],{aggregationType:'byProperty'}),query(['page']),requestJSON(`${root}/sitemaps`,{fetchImpl,headers}),query([],{aggregationType:'byProperty'},previous)]);
+  const names = ['totals','daily','queries','pages','sitemaps','comparison'];
   const errors = Object.fromEntries(results.flatMap((result,index)=>result.status === 'rejected' ? [[names[index],safeError(result.reason)]] : []));
   if (results.slice(0,4).every(result=>result.status === 'rejected')) throw results[0].reason;
   const data = results.map(result=>result.status === 'fulfilled' ? result.value : null);
   const summary = data[0]?.rows?.[0];
   const metrics = Object.fromEntries(['clicks','impressions','ctr','position'].map(name=>[name,numeric(summary?.[name])]));
+  const previousSummary = data[5]?.rows?.[0];
+  const comparison = {window:{...previous,timeZone:range.timeZone},metrics:Object.fromEntries(['clicks','impressions','ctr','position'].map(name=>[name,numeric(previousSummary?.[name])]))};
   const daily = (data[1]?.rows || []).map(row=>({date:row.keys?.[0],clicks:numeric(row.clicks),impressions:numeric(row.impressions)})).sort((a,b)=>a.date.localeCompare(b.date));
-  return {id:'search-console',name:'Google Search Console',status:data.slice(0,4).some(report=>report?.rows?.length) ? 'ok' : Object.keys(errors).length ? 'error' : 'empty',fetchedAt:now.toISOString(),range,metrics,daily,
+  return {id:'search-console',name:'Google Search Console',status:data.slice(0,4).some(report=>report?.rows?.length) ? 'ok' : Object.keys(errors).length ? 'error' : 'empty',fetchedAt:now.toISOString(),range,comparison,metrics,daily,
     pages:(data[3]?.rows || []).map(row=>({path:row.keys?.[0] || '',clicks:numeric(row.clicks),impressions:numeric(row.impressions)})),
     queries:(data[2]?.rows || []).map(row=>({query:row.keys?.[0] || '',...Object.fromEntries(['clicks','impressions','ctr','position'].map(name=>[name,numeric(row[name])]))})),
     channels:[],events:[],milestones:[],sitemaps:data[4]?.sitemap?.map(item=>({path:item.path,lastSubmitted:item.lastSubmitted,lastDownloaded:item.lastDownloaded,isPending:item.isPending,warnings:numeric(item.warnings),errors:numeric(item.errors)})) ?? null,

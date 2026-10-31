@@ -101,3 +101,39 @@ test('overview metrics fall back to a configured traffic source when GA4 is abse
   assert.match(app.innerHTML,/aria-label="Vercel 核心指标"/);
   assert.doesNotMatch(app.innerHTML,/GA4 · 已同步/);
 });
+
+test('metric deltas render only for comparable positive previous values',async()=>{
+  const elements=new Map();
+  const app={innerHTML:'',querySelectorAll:()=>[]};
+  const element=selector=>{
+    if(!elements.has(selector)) elements.set(selector,{disabled:false,listeners:{},addEventListener(event,handler){this.listeners[event]=handler;},focus(){}});
+    return elements.get(selector);
+  };
+  const context=vm.createContext({
+    URL,Intl,Date,console,
+    location:{href:'https://private.example/',hash:'',pathname:'/',search:''},
+    history:{replaceState(){}},window:{addEventListener(){}},
+    document:{querySelector(selector){
+      if(selector==='#app') return app;
+      if(['#logout','#refresh'].includes(selector)) return element(selector);
+      return null;
+    }},
+    async fetch(url){
+      if(url==='/api/session') return response({configured:true,authenticated:true});
+      if(url.startsWith('/api/summary')) return response({site:'example.com',days:7,sources:{
+        ga4:{id:'ga4',status:'ok',metrics:{activeUsers:200,pageViews:1000,sessions:300,engagementRate:.5},
+             comparison:{window:{start:'2026-10-14',end:'2026-10-20',timeZone:'UTC'},
+                         metrics:{activeUsers:100,pageViews:800,sessions:null,engagementRate:.6}}},
+      }});
+      throw Error(`Unexpected request ${url}`);
+    },
+  });
+  vm.runInContext(code,context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(app.innerHTML,/▲ 100%/);
+  assert.match(app.innerHTML,/▲ 25%/);
+  assert.match(app.innerHTML,/▼ 16\.7%/);
+  assert.match(app.innerHTML,/较上 7 天/);
+  const sessions=app.innerHTML.match(/会话数<\/div><div class="metric-value">[^<]*<\/div><div class="metric-foot">([^<]*)/);
+  assert.ok(sessions); assert.doesNotMatch(sessions[1],/▲|▼/);
+});

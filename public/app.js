@@ -17,6 +17,10 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': 
 const numeric = value => typeof value === 'number' && Number.isFinite(value);
 const number = value => numeric(value) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(value) : '—';
 const percent = value => numeric(value) ? `${number(value * 100)}%` : '—';
+// A delta needs a positive previous value: zero or missing previous stays blank
+// instead of fabricating an infinite or made-up trend.
+function delta(data, key) { const current = metric(data, key), previous = data?.comparison?.metrics?.[key]; return numeric(current) && numeric(previous) && previous > 0 ? (current - previous) / previous : null; }
+function deltaChip(data, key) { const value = delta(data, key); return value === null ? '' : `<span class="delta ${value < 0 ? 'negative' : 'positive'}">${value < 0 ? '▼' : '▲'} ${number(Math.abs(value) * 100)}%</span>`; }
 const timestamp = value => { const date = new Date(value); return value && !Number.isNaN(date.getTime()) ? date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '尚未同步'; };
 let tab = Object.hasOwn(titles, location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
 let days = 7;
@@ -37,13 +41,16 @@ function meta(data) { return `<div class="source-meta">${escape(providers[data.i
 function makeDemo() {
  const now = new Date().toISOString();
  const dates = Array.from({ length: days }, (_, index) => { const d = new Date(); d.setUTCDate(d.getUTCDate() - (days - 1 - index)); return d.toISOString().slice(0, 10); });
+ const shift = (date, offset) => { const d = new Date(`${date}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + offset); return d.toISOString().slice(0, 10); };
+ const comparisonWindow = { start: shift(dates[0], -days), end: shift(dates[0], -1), timeZone: 'Asia/Shanghai' };
  const views = [610, 895, 704, 824, 1068, 890, 996];
  const users = [202, 306, 351, 296, 367, 295, 329];
  const base = id => ({ id, name: providers[id].name, status: 'ok', fetchedAt: now, range: { start: dates[0], end: dates.at(-1), timeZone: 'Asia/Shanghai' }, metrics: {}, daily: [], pages: [], events: [], channels: [], milestones: [] });
  const totalViews = dates.reduce((sum, _, i) => sum + views[i % 7], 0);
- const ga4 = { ...base('ga4'), metrics: { activeUsers: 1284, pageViews: totalViews, sessions: 1620, engagementRate: .684, realtimeUsers: 8 }, daily: dates.map((date, i) => ({ date, pageViews: views[i % 7], activeUsers: users[i % 7] })), pages: [{ path: '/', views: Math.round(totalViews * .712) }, { path: '/about/', views: totalViews - Math.round(totalViews * .712) }], events: [{ name: 'game_ready', count: 932 }, { name: 'play_milestone', count: 1106 }, { name: 'planet_publish', count: 24 }, { name: 'planet_visit', count: 86 }, { name: 'postcard_share', count: 31 }, { name: 'postcard_download_requested', count: 48 }], milestones: [{ seconds: 60, count: 642 }, { seconds: 300, count: 318 }, { seconds: 600, count: 146 }], channels: [{ name: '直接访问', sessions: 804 }, { name: '自然搜索', sessions: 486 }, { name: '引荐', sessions: 330 }] };
- const cf = { ...base('cloudflare'), metrics: { visits: dates.reduce((sum, _, i) => sum + users[i % 7] + 80, 0), pageViews: totalViews + days * 40 }, daily: dates.map((date, i) => ({ date, pageViews: views[i % 7] + 40, visits: users[i % 7] + 80 })) };
- const vercel = { ...base('vercel'), metrics: { visitors: 1308, pageViews: totalViews + days * 10 }, daily: dates.map((date, i) => ({ date, pageViews: views[i % 7] + 10, visitors: users[i % 7] + 8 })) };
+ const ga4 = { ...base('ga4'), comparison: { window: comparisonWindow, metrics: { activeUsers: 1140, newUsers: 2, pageViews: Math.round(totalViews / 1.183), sessions: 1477, engagementRate: .699 } }, metrics: { activeUsers: 1284, pageViews: totalViews, sessions: 1620, engagementRate: .684, realtimeUsers: 8 }, daily: dates.map((date, i) => ({ date, pageViews: views[i % 7], activeUsers: users[i % 7] })), pages: [{ path: '/', views: Math.round(totalViews * .712) }, { path: '/about/', views: totalViews - Math.round(totalViews * .712) }], events: [{ name: 'game_ready', count: 932 }, { name: 'play_milestone', count: 1106 }, { name: 'planet_publish', count: 24 }, { name: 'planet_visit', count: 86 }, { name: 'postcard_share', count: 31 }, { name: 'postcard_download_requested', count: 48 }], milestones: [{ seconds: 60, count: 642 }, { seconds: 300, count: 318 }, { seconds: 600, count: 146 }], channels: [{ name: '直接访问', sessions: 804 }, { name: '自然搜索', sessions: 486 }, { name: '引荐', sessions: 330 }] };
+ const cfVisits = dates.reduce((sum, _, i) => sum + users[i % 7] + 80, 0), cfViews = totalViews + days * 40;
+ const cf = { ...base('cloudflare'), comparison: { window: comparisonWindow, metrics: { visits: Math.round(cfVisits / 1.12), pageViews: Math.round(cfViews / 1.08) } }, metrics: { visits: cfVisits, pageViews: cfViews }, daily: dates.map((date, i) => ({ date, pageViews: views[i % 7] + 40, visits: users[i % 7] + 80 })) };
+ const vercel = { ...base('vercel'), comparison: { window: comparisonWindow, metrics: { visitors: 1180, pageViews: Math.round((totalViews + days * 10) / 1.12) } }, metrics: { visitors: 1308, pageViews: totalViews + days * 10 }, daily: dates.map((date, i) => ({ date, pageViews: views[i % 7] + 10, visitors: users[i % 7] + 8 })) };
  return { site: 'example.com', days, generatedAt: now, sources: { ga4, cloudflare: cf, vercel, 'search-console': { ...base('search-console'), status: 'unconfigured' }, bing: { ...base('bing'), status: 'unconfigured' } } };
 }
 async function request(path, options = {}) {
@@ -66,8 +73,7 @@ function metricsStrip() {
  const id = ['ga4', 'vercel', 'cloudflare'].find(candidate => usable(source(candidate))) || 'ga4';
  const data = source(id), provider = providers[id].name;
  const metrics = id === 'ga4' ? [['活跃用户', 'activeUsers', false], ['页面浏览', 'pageViews', false], ['会话数', 'sessions', false], ['互动率', 'engagementRate', true]] : id === 'vercel' ? [['独立访客', 'visitors', false], ['页面浏览', 'pageViews', false]] : [['访问次数', 'visits', false], ['页面浏览', 'pageViews', false]];
- const deltas = ['+12.6%', '+18.3%', '+9.7%', '-2.1%'];
- return `<section class="metric-strip" aria-label="${escape(provider)} 核心指标">${metrics.map(([name, key, rate], index) => `<div class="metric"><div class="metric-label">${name}</div><div class="metric-value">${rate ? percent(metric(data, key)) : number(metric(data, key))}</div><div class="metric-foot">${demo && id === 'ga4' ? `<span class="${index === 3 ? 'negative' : 'positive'}">${index === 3 ? '▼' : '▲'} ${deltas[index]}</span>　较上 ${days} 天 · 示例` : `${escape(provider)} · ${escape(statusNames[data.status] || '状态未知')}`}</div></div>`).join('')}</section>`;
+ return `<section class="metric-strip" aria-label="${escape(provider)} 核心指标">${metrics.map(([name, key, rate]) => { const chip = deltaChip(data, key); return `<div class="metric"><div class="metric-label">${name}</div><div class="metric-value">${rate ? percent(metric(data, key)) : number(metric(data, key))}</div><div class="metric-foot">${chip ? `${chip} 较上 ${days} 天${demo ? ' · 示例' : ''}` : `${escape(provider)} · ${escape(statusNames[data.status] || '状态未知')}`}</div></div>`; }).join('')}</section>`;
 }
 function chart(data, series) {
  const reported = usable(data) ? (Array.isArray(data.daily) ? data.daily : []).filter(row => /^\d{4}-\d{2}-\d{2}$/.test(row.date)).slice(0, 90) : [];
@@ -159,7 +165,7 @@ function sourceTotals(data) {
  ] : data.id === 'cloudflare' ? [['访问次数','visits'],['页面浏览','pageViews']]
   : data.id === 'vercel' ? [['独立访客','visitors'],['页面浏览','pageViews']]
   : [['点击','clicks'],['展示','impressions'],['点击率','ctr'],['平均排名','position']];
- return `<dl class="source-totals" aria-label="${escape(providers[data.id].name)} 期间汇总">${metrics.map(([label,key]) => `<div><dt>${label}</dt><dd>${['engagementRate','ctr'].includes(key) ? percent(metric(data,key)) : number(metric(data,key))}</dd></div>`).join('')}</dl>`;
+ return `<dl class="source-totals" aria-label="${escape(providers[data.id].name)} 期间汇总">${metrics.map(([label,key]) => { const chip = deltaChip(data,key); return `<div><dt>${label}</dt><dd>${['engagementRate','ctr'].includes(key) ? percent(metric(data,key)) : number(metric(data,key))}${chip ? ` ${chip}` : ''}</dd></div>`; }).join('')}</dl>`;
 }
 function trafficDetails(data) {
  const id = data.id;
@@ -185,7 +191,7 @@ function searchDetails(data) {
 }
 function searchCard(id) {
  const data = source(id); const queries = usable(data) && Array.isArray(data.queries) ? data.queries : [];
- return `<section class="card source-card"><div class="card-header"><div class="source-detail-title"><span class="source-symbol ${id}" aria-hidden="true">${providers[id].symbol}</span><h2>${id === 'bing' ? 'Bing 搜索' : 'Google 网页搜索'}</h2></div>${sourceStatus(data)}</div><p>${escape(providers[id].description)}</p><div class="search-metrics">${[['点击', 'clicks'], ['展示', 'impressions'], ['点击率', 'ctr'], ['平均排名', 'position']].map(([label, key]) => `<div><span class="small">${label}</span><span class="value">${key === 'ctr' ? percent(metric(data, key)) : number(metric(data, key))}</span></div>`).join('')}</div>${queries.length ? dataTable(queries, [{key:'query',label:'搜索词'},...searchColumns], '热门搜索词') : empty(data, '搜索词数据')}${searchDetails(data)}${meta(data)}<button class="outline-button" data-source="${id}">查看数据源详情 ↗</button></section>`;
+ return `<section class="card source-card"><div class="card-header"><div class="source-detail-title"><span class="source-symbol ${id}" aria-hidden="true">${providers[id].symbol}</span><h2>${id === 'bing' ? 'Bing 搜索' : 'Google 网页搜索'}</h2></div>${sourceStatus(data)}</div><p>${escape(providers[id].description)}</p><div class="search-metrics">${[['点击', 'clicks'], ['展示', 'impressions'], ['点击率', 'ctr'], ['平均排名', 'position']].map(([label, key]) => { const chip = deltaChip(data, key); return `<div><span class="small">${label}</span><span class="value">${key === 'ctr' ? percent(metric(data, key)) : number(metric(data, key))}</span>${chip ? `<span class="small">${chip} 较上期</span>` : ''}</div>`; }).join('')}</div>${queries.length ? dataTable(queries, [{key:'query',label:'搜索词'},...searchColumns], '热门搜索词') : empty(data, '搜索词数据')}${searchDetails(data)}${meta(data)}<button class="outline-button" data-source="${id}">查看数据源详情 ↗</button></section>`;
 }
 function searchView() { return `<p class="section-intro">查看访客通过搜索发现网站的情况。Google 网页搜索和 Bing 按各自口径展示，点击量不合并。</p><div class="source-grid">${searchCard('search-console')}${searchCard('bing')}</div>`; }
 function sourceView() { return `<p class="section-intro">五个数据源，分别观察同一个网站。数据由服务端读取，凭据只留在服务端；免费额度受限时，其余观测仍然可用。</p><div class="source-grid">${Object.keys(providers).map(id => { const data = source(id); return `<section class="card source-card"><div class="card-header"><div class="source-detail-title"><span class="source-symbol ${id}" aria-hidden="true">${providers[id].symbol}</span><h2>${providers[id].name}</h2></div>${sourceStatus(data)}</div><p>${escape(providers[id].description)}</p>${data.note ? `<p>${escape(data.note)}</p>` : ''}${data.error?.message ? `<p>最近读取：${escape(data.error.message)}</p>` : ''}${sourceTotals(data)}${['ga4','cloudflare','vercel'].includes(id) ? trafficDetails(data) : searchDetails(data)}${meta(data)}<button class="outline-button" data-source="${id}">连接与口径说明 ↗</button></section>`; }).join('')}</div>`; }

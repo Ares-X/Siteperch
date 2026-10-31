@@ -24,6 +24,9 @@ test('event definitions override the optional preset and publish only display fi
   assert.equal(config.primarySource, 'cloudflare');
   assert.deepEqual(config.eventConfig.definitions.game_ready, {label: '开始体验', group: '互动', order: 2});
   assert.equal(config.eventConfig.definitions.play_milestone.label, '航行里程碑');
+  for (const name of ['flight_time','flight_distance','coflight_connected','planet_letter_confirmed','planet_reply_sent','link_copied','travel_completed']) {
+    assert.equal(typeof config.eventConfig.definitions[name]?.label, 'string', `Missing migrated event ${name}`);
+  }
   assert.equal(config.eventConfig.definitions.download.label, '下载');
   assert.equal(config.eventConfig.definitions.page_view.hidden, true);
   assert.doesNotMatch(JSON.stringify(config.eventConfig), /fixture-secret|fixture-google-secret/);

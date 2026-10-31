@@ -7,6 +7,13 @@ const gameEvents = [
   ['planet_visit', '拜访星球'],
   ['postcard_share', '分享明信片'],
   ['postcard_download_requested', '请求下载明信片'],
+  ['flight_time', '有效航行时长上报'],
+  ['flight_distance', '航程上报'],
+  ['coflight_connected', '同航连接建立'],
+  ['planet_letter_confirmed', '短笺确认（含恢复）'],
+  ['planet_reply_sent', '星球回复已寄出'],
+  ['link_copied', '链接已复制'],
+  ['travel_completed', '跳转抵达'],
 ];
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 

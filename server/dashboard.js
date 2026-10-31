@@ -5,6 +5,11 @@ import {readCloudflare} from './providers/cloudflare.js';
 import {readVercel} from './providers/vercel.js';
 import {readBing} from './providers/bing.js';
 
+function transientOptionalError(error) {
+  if (!error || ['coverage','unsupported','configuration','authorization','range'].includes(error.code)) return false;
+  return ['network','timeout','quota'].includes(error.code) || error.status === 408 || error.status === 429 || (error.status >= 500 && error.status < 600);
+}
+
 // Best-effort warm-instance cache only. It is not a session store or durable database.
 export function createDashboard(env, {fetchImpl = globalThis.fetch, now = () => new Date(), providers = {readGoogle,readCloudflare,readVercel,readBing}} = {}) {
   const config = configFrom(env), cached = new Map(), running = new Map();
@@ -39,9 +44,9 @@ export function createDashboard(env, {fetchImpl = globalThis.fetch, now = () => 
           sources[id]={...old,status:'stale',error:source.error,lastAttemptAt:time.toISOString(),note:'本次读取失败，暂时保留上次数据。请留意更新时间。'};
         }
       }
-      const hasErrors=Object.values(sources).some(s=>['error','stale'].includes(s.status));
+      const hasErrors=Object.values(sources).some(s=>['error','stale'].includes(s.status) || Object.values(s.metadata?.optionalErrors || {}).some(transientOptionalError));
       const expires=time.getTime()+(hasErrors?30000:300000);
-      const value={site:config.site,generatedAt:time.toISOString(),days,sources};
+      const value={site:config.site,generatedAt:time.toISOString(),days,sources,presentation:{primarySource:config.primarySource,events:config.eventConfig,warnings:config.presentationWarnings}};
       cached.set(days,{value,expires});
       return {...value,cache:{hit:false,expiresAt:new Date(expires).toISOString(),scope:'warm-instance'}};
     })();

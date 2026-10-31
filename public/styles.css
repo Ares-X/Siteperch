@@ -292,6 +292,10 @@ svg {
   margin-bottom:18px;
 }
 
+.metric-strip.compact {
+  grid-template-columns:repeat(2,minmax(0,1fr));
+}
+
 .metric {
   padding:0 23px;
   border-right:1px solid var(--line);
@@ -322,12 +326,12 @@ svg {
   line-height:1.6;
 }
 
-.metric-foot .positive {
+.metric-foot .positive,.delta.positive {
   color:#0caf93;
   font-size:12px;
 }
 
-.metric-foot .negative {
+.metric-foot .negative,.delta.negative {
   color:#ec626c;
   font-size:12px;
 }
@@ -419,6 +423,37 @@ svg {
   stroke-width:1;
 }
 
+.chart:focus {
+  outline:2px solid var(--violet);
+  outline-offset:2px;
+  border-radius:4px;
+}
+
+.chart-hit {
+  fill:transparent;
+  pointer-events:all;
+  cursor:crosshair;
+}
+
+.chart-cursor {
+  stroke:#b7c1d6;
+  stroke-width:1;
+  stroke-dasharray:4 3;
+}
+
+.chart-focus {
+  stroke:#fff;
+  stroke-width:1.5;
+}
+
+.chart-readout {
+  font-size:11px;
+  color:#6b7a92;
+  min-height:16px;
+  margin:2px 0 6px;
+  font-variant-numeric:tabular-nums;
+}
+
 .chart-line {
   fill:none;
   stroke-width:2.5;
@@ -439,6 +474,10 @@ svg {
   color:#929caf;
   margin:9px 0 0;
   line-height:1.65;
+}
+
+.report-quality {
+  overflow-wrap:anywhere;
 }
 
 .chart-controls {
@@ -599,6 +638,22 @@ tr:last-child td {
   grid-template-columns:95px 1fr 37px;
   align-items:center;
   gap:10px;
+  font-size:12px;
+}
+
+.event-row>span:first-child {
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+
+.event-group-label {
+  font-size:12px;
+  margin:8px 0 0;
+}
+.event-value {
+  display:block;
+  margin-top:4px;
+  color:var(--muted);
   font-size:12px;
 }
 
@@ -1097,7 +1152,7 @@ tr:last-child td {
   .metric-foot {
     font-size:9px;
   }
-  .metric-foot .positive,.metric-foot .negative {
+  .metric-foot .positive,.metric-foot .negative,.delta.positive,.delta.negative {
     font-size:10px;
   }
   .banner {
@@ -1155,6 +1210,9 @@ tr:last-child td {
   }
   .metric:nth-child(-n+2) {
     border-bottom:1px solid var(--line);
+  }
+  .metric-strip.compact .metric {
+    border-bottom:0;
   }
   .metric-value {
     font-size:34px;

@@ -1,5 +1,11 @@
+import {presentationFrom} from './presentation.js';
+
 export function configFrom(env = {}) {
+  const presentation = presentationFrom(env);
   return {
+    primarySource: presentation.primarySource,
+    eventConfig: presentation.events,
+    presentationWarnings: presentation.warnings,
     site: env.SITE_DOMAIN || '',
     gaPropertyId: env.GA4_PROPERTY_ID || '',
     searchConsoleSite: env.SEARCH_CONSOLE_SITE || '',

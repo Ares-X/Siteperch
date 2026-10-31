@@ -7,10 +7,12 @@
 ## 已有能力
 
 - 访问总览、趋势、来源、页面、地区、设备、行为事件及搜索明细；各平台可用字段分别展示。
+- 核心指标支持与上一期间对比：GA4 在同一批报表请求里附加日期范围，Bing 从同一批返回行中过滤，Search Console、Vercel 与 Cloudflare 各自平移窗口补一次读取；上一期间缺失、为零或超出保留期时不显示涨跌，不伪造趋势。
 - 近 7 天、28 天和手动刷新；示例布局通过 `?demo=1` 打开，并始终显示示例标记。
 - 五个提供方独立取数；未配置、空报表、真实零值、错误和旧快照分别显示。
-- 保留各平台的时区、去重、抽样及处理延迟说明，不合并不同平台的访客数。
-- 保留原有 GA4 游戏事件与 60/300/600 秒里程碑展示；事件次数不代表独立玩家、留存或转化漏斗。
+- 保留各平台的时区、去重、抽样及处理延迟说明，不合并不同平台的访客数。数据源详情展示 GA4 接口配额与环比参考期。
+- GA4 事件默认按原始名称展示，可配置标签、分组、排序及隐藏；LonelySky 游戏事件与 60/300/600 秒里程碑为可选预设。事件次数不代表独立用户、留存或转化漏斗。
+- 总览可选择 GA4、Cloudflare 或 Vercel 为主数据源，指标、趋势和页面卡片使用对应平台的名称与口径。
 
 ## 本地运行
 
@@ -36,6 +38,9 @@ npm run check
 | --- | --- |
 | `APP_ORIGIN` | 看板的实际 HTTPS 来源，不含路径 |
 | `SITE_DOMAIN` | 被统计网站的显示域名 |
+| `DASHBOARD_PRIMARY_SOURCE` | 总览默认数据源：`auto`（默认）、`ga4`、`cloudflare` 或 `vercel` |
+| `DASHBOARD_EVENT_PRESET` | `generic`（默认）或 `lonelysky`；后者启用游戏标签及专用里程碑查询 |
+| `DASHBOARD_EVENT_DEFINITIONS_JSON` | 事件名称到展示配置的 JSON 对象，默认 `{}` |
 | `DASHBOARD_PASSWORD_SHA256` | 所有者口令的 SHA-256 摘要 |
 | `DASHBOARD_SESSION_SECRET` | 至少 32 字符的随机会话签名密钥 |
 | `GA4_PROPERTY_ID`、`SEARCH_CONSOLE_SITE` | Google 媒体资源和 Search Console 站点资源 |
@@ -49,26 +54,44 @@ npm run check
 
 令牌的平台权限可能比本程序执行的读取操作更宽。提供方密钥、口令摘要和会话密钥应存为托管平台 Secret；站点和项目 ID 可存为 Config。后端只读取管理员配置的站点，不接受浏览器传来的目标 URL 或项目 ID。
 
+### 总览与事件展示
+
+`DASHBOARD_PRIMARY_SOURCE=auto` 按 GA4、Cloudflare、Vercel 的顺序选择首个已配置的数据源。临时读取失败会保留该来源及错误状态；界面的来源选择器可切换指标、趋势和页面卡片。Cloudflare 仍显示“访问次数”，Vercel 显示“独立访客”，各平台数值分别读取。
+
+默认事件页面展示 GA4 返回的事件（当前查询最多返回 100 个事件名称）。可在托管平台设置以下 JSON；本地 `.env.local` 使用单引号包住整个 JSON：
+
+```dotenv
+DASHBOARD_EVENT_DEFINITIONS_JSON='{"download":{"label":"下载","group":"互动","order":1},"sign_up":{"label":"注册","group":"转化","order":2},"page_view":{"hidden":true}}'
+```
+
+`label`、`group` 是展示文本，`order` 是数字并按升序排列，`hidden` 是布尔值。数值事件可显式配置 `valueUnit` 为 `seconds` 或 `game_units`，分别显示累计秒数或游戏距离单位；缺值保持未提供，未配置单位时不推断数值含义。未定义的事件继续显示原始名称。定义只改变展示，不创建网站埋点，也不会补回上游未返回的事件。配置格式错误会显示提示并使用有效配置或默认名称，提示不回显原始配置内容。展示配置会随已认证报表发送到浏览器，勿在这些字段中填写凭据。
+
+**已有 LonelySky 部署迁移：**如需保留游戏事件中文标签和里程碑，请设置 `DASHBOARD_EVENT_PRESET=lonelysky` 后重新部署。它会启用 `play_milestone` 的 `customEvent:threshold_seconds` 查询；对应网站仍须自行发送事件，并在 GA4 注册该自定义维度。自定义事件定义可覆盖预设标签、排序和可见性。默认 `generic` 不查询游戏专用维度。
+
 ## 托管
 
 **Vercel**：将此仓库连接到独立的 Vercel 项目，Root Directory 留空，Framework 选择 Other，Output Directory 为 `public`，Install Command 留空。`vercel.json` 已配置测试和语法检查、东京单个 Node.js Function 及 `/api/*` 路由。仅 `main` 自动部署，PR 分支预览保持关闭。每次修改生产环境配置后重新部署。
 
 **Cloudflare Workers + Static Assets**：`wrangler.jsonc` 使用同一 `server/worker.js` 后端，只有 `/api/*` 优先执行 Worker，静态资源直接交付。将配置和 Secrets 放到对应 Worker 后发布；仓库包含适配配置，不代表你的 Cloudflare 部署已经启用。CF Pages 前端若使用此方案，需要将同源 API 路由到该 Worker。
 
+`public/_headers` 为 Workers 静态资产设置与 Vercel 对齐的 CSP、`nosniff`、Referrer Policy 等响应头。API 的私有响应头仍由后端设置，静态资产不因此增加 Worker 执行。
+
 浏览器只请求本站，提供方 API 由托管后端访问。前端没有外部脚本、字体或图表 CDN。托管域名本身仍须可达，后端代理无法补回网站采集阶段漏掉的数据。
 
 ## 私有访问与额度
 
-应用使用签名 `HttpOnly; Secure; SameSite=Strict` 会话，有效 8 小时；POST 校验同源 Origin，修改口令摘要或签名密钥使旧会话失效。口令不存入浏览器 localStorage，私有 API 返回 `private, no-store`，不开放跨域。
+应用使用签名 `HttpOnly; Secure; SameSite=Strict` 会话，有效 8 小时；POST 校验同源 Origin，修改口令摘要或签名密钥使旧会话失效。口令不存入浏览器 localStorage，私有 API 返回 `private, no-store`，不开放跨域。登录接口由平台适配器提供可信来源（Vercel 的 `x-vercel-forwarded-for`、Workers 的 `CF-Connecting-IP`、本地 socket 地址），通用处理器不读取访客自填 IP header。认证异步工作前预留在途预算，结束后释放，只有错误口令计入失败次数。登录接口在实例内做尽力限流：同一来源连续失败 5 次起触发指数退避（429 与 `Retry-After`，最长 15 分钟），跨来源失败总量另有全局上限；计数只存在于热实例，冷启动和多实例不共享，不能替代 CDN 层面的防护。
 
 现有私人部署另有 Vercel 项目级 CDN Basic 认证，在进入 Function 前拒绝不匹配的请求。这个规则保存在平台私有 Routing Rules 中，源码不包含凭据；新建 Vercel 项目时需要单独配置。复用旧项目迁移仓库时保留并复核该规则。页面“退出”只清除应用会话，浏览器可能继续缓存 Basic 凭据。
 
 CDN Basic 可以拦截未认证请求进入应用 Function，但 CDN 请求仍计入额度，认证通过的请求仍消耗正常资源。它不等于限流。
 
-每次打开或手动刷新发送一个 summary 请求，后端并行取数，单次总预算 30 秒；无自动重试或高频轮询。实例内缓存最多 5 分钟并合并并发请求；冷启动和多实例不共享缓存，缓存减少上游请求而不免除 Function 调用。暂存旧快照最长一小时，并保留旧时间与失败状态。没有数据库、定时采集、付费存储或自动升级。
+每次打开或手动刷新发送一个 summary 请求，后端并行取数，单次总预算 30 秒；无自动重试或高频轮询。正常结果使用 5 分钟实例内缓存并合并并发请求；整源失败或网络、限流、上游服务错误等暂时性子报表失败使用 30 秒缓存，只有下一次打开或手动刷新才重试。未支持的能力、覆盖限制等稳定子报表状态保持正常缓存。冷启动和多实例不共享缓存，缓存减少上游请求而不免除 Function 调用。暂存旧快照最长一小时，并保留旧时间与失败状态。环比对比会增加 Search Console / Vercel 请求和 Cloudflare 分块查询；GA4 扩大同一请求的日期范围也可能增加 token 消耗，Bing 复用返回行。没有数据库、定时采集、付费存储或自动升级。
 
 ## 数据口径与验证
 
-GA4 是访问和事件来源，实时指标为近 30 分钟活跃用户。期间去重用户不由每日去重用户累加。Google 搜索仅请求已定稿的网页搜索数据，并预留处理延迟；Bing 统计单独展示。Cloudflare RUM 可能抽样，页面显示观察到的采样间隔及覆盖限制。Vercel 只取 production 分组的期间访客数。
+GA4 是访问和事件来源。历史事件分别读取 `eventCount`（次数）和 `eventValue`（数值参数 `value` 的和）；LonelySky 预设把有效航行秒数与游戏距离分别显示，不跨单位相加。行为页另列近 30 分钟已接收事件，仅显示实时次数，不把它们累加到历史期间或冒充实时航程。总人数与按事件分组的指标组合在实际接口不兼容，因此使用两次明确的并发实时读取，分别保留成功、空值和错误状态，不按事件累加去重人数。每次 GA4 快照读取历史批报表、实时人数和实时事件三个固定请求；LonelySky 预设再加既有里程碑请求。实时指标为近 30 分钟活跃用户，从无事件分组的独立报表读取唯一人数，其读取状态独立于历史汇总；历史报表为空时仍可显示有效的实时人数或真实的 0。期间去重用户不由每日去重用户累加。GA4 的采样、阈值、其他行合并和空结果原因按各份报告分别提示；“适用阈值”不等于已经有数据被隐藏。Google 搜索仅请求已定稿的网页搜索数据，并预留处理延迟；Bing 统计单独展示。Cloudflare RUM 可能抽样，页面显示观察到的采样间隔及覆盖限制。Vercel 只取 production 分组的期间访客数。
 
 `npm test` 覆盖固定报表响应、WebCrypto JWT、登录与会话隔离、同源限制、错误脱敏、时区、期间去重、采样边界、局部失败和缓存。迁移或部署后还需要实际验证认证、7/28 天报表与五个提供方；本地测试不代表提供方授权或生产连接已经成功。
+
+GitHub Actions 在 PR 和 `main` 提交上运行 Node.js 22、24 的测试与语法检查，仅需仓库读取权限，不读取生产 Secrets、不部署预览。前端回归测试使用实际 `app.js` 与模拟 DOM、报表响应；实际浏览器渲染及托管端取数需另外验收。

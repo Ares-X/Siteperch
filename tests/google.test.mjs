@@ -1,0 +1,201 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readGoogle} from '../server/providers/google.js';
+
+let counter = 0;
+const config = () => ({gaPropertyId:'123456789',searchConsoleSite:'sc-domain:example.com',googleClientId:`fixture-client-${++counter}`,googleClientSecret:'fixture-secret',googleRefreshToken:'fixture-refresh'});
+const now = new Date('2026-10-27T01:00:00Z');
+const response = (body,status=200) => new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
+function report(dimensions,metrics,values,keys=[],metadata={timeZone:'Asia/Shanghai'}) {
+  return {dimensionHeaders:dimensions.map(name=>({name})),metricHeaders:metrics.map(name=>({name})),rows:values.map((row,index)=>({dimensionValues:(keys[index] || []).map(value=>({value})),metricValues:row.map(value=>({value}))})),metadata};
+}
+function fixtureFetch(override = () => null) {
+  const calls = [];
+  const fetchImpl = async (url,options) => {
+    calls.push({url,options,body:options.body?.startsWith('{') ? JSON.parse(options.body) : options.body});
+    const custom = await override(url,options,calls);
+    if (custom) return custom;
+    if (url.endsWith('/token')) return response({access_token:'fixture-provider-access-token',expires_in:3600});
+    if (url.endsWith(':batchRunReports')) return response({reports:[
+      report([],['activeUsers','newUsers','sessions','screenPageViews','engagementRate'],[['8','3','12','18','0']]),
+      report(['date'],['activeUsers','screenPageViews'],[['7','10'],['6','8']],[['20261025'],['20261026']]),
+      report(['pagePath'],['screenPageViews'],[['18']],[['/']]),
+      report(['sessionDefaultChannelGroup'],['sessions'],[['12']],[['Direct']]),
+      report(['eventName'],['eventCount'],[['3']],[['play_milestone']]),
+    ]});
+    if (url.endsWith(':runRealtimeReport')) return response(report([],['activeUsers'],[['0']]));
+    if (url.endsWith(':runReport')) return response(report(['customEvent:threshold_seconds'],['eventCount'],[['2'],['1']],[['60'],['(not set)']]));
+    if (url.endsWith('/sitemaps')) return response({sitemap:[{path:'https://example.com/sitemap.xml',errors:'0',warnings:'1'}]});
+    if (url.endsWith('/searchAnalytics/query')) {
+      const {dimensions} = JSON.parse(options.body);
+      return response({rows:[{keys:dimensions.length ? [dimensions[0] === 'date' ? '2026-10-22' : dimensions[0] === 'page' ? 'https://example.com/' : 'lonely sky'] : [],clicks:0,impressions:10,ctr:0,position:4.2}],responseAggregationType:'byProperty'});
+    }
+    throw new Error('unexpected fixture request');
+  };
+  return {calls,fetchImpl};
+}
+
+test('no authorization means unconfigured and no network request',async()=>{
+  const result = await readGoogle({}, {fetchImpl:()=>{throw new Error('must not fetch');}});
+  assert.equal(result.ga4.status,'unconfigured');
+  assert.equal(result['search-console'].status,'unconfigured');
+});
+
+test('declared provider fixtures preserve distinct totals, zeroes and canonical request shapes',async()=>{
+  const fixture = fixtureFetch();
+  const result = await readGoogle(config(),{now,days:90,fetchImpl:fixture.fetchImpl});
+  assert.equal(result.ga4.metrics.activeUsers,8);
+  assert.equal(result.ga4.daily[0].activeUsers,7);
+  assert.equal(result.ga4.metrics.engagementRate,0);
+  assert.equal(result.ga4.metrics.realtimeUsers,0);
+  assert.deepEqual(result.ga4.milestones,[{seconds:60,count:2}]);
+  assert.equal(result.ga4.range.timeZone,'Asia/Shanghai');
+  assert.equal(result.ga4.range.start,'2026-09-30');
+  assert.equal(result.ga4.range.end,'2026-10-27');
+  assert.equal(result.ga4.daily[0].date,'2026-10-25');
+  assert.equal(result['search-console'].metrics.clicks,0);
+  assert.equal(result['search-console'].metadata.latestReportedDate,'2026-10-22');
+  assert.equal(result['search-console'].range.end,'2026-10-23');
+  const batch = fixture.calls.find(call=>call.url.endsWith(':batchRunReports')).body;
+  assert.equal(batch.requests.length,5);
+  assert.deepEqual(batch.requests[0].dimensions,[]);
+  assert.equal(batch.requests[1].dateRanges[0].startDate,'27daysAgo');
+  assert.ok(batch.requests.every(request=>request.dateRanges[0].endDate === 'today'));
+  const searchCalls = fixture.calls.filter(call=>call.url.endsWith('/searchAnalytics/query'));
+  assert.equal(searchCalls.length,4);
+  assert.ok(searchCalls.every(call=>call.url.includes('sc-domain%3Aexample.com') && call.body.dataState === 'final'));
+  assert.equal(searchCalls.find(call=>call.body.dimensions[0] === 'query').body.rowLimit,10);
+  assert.ok(!JSON.stringify(result).includes('fixture-provider-access-token'));
+  assert.ok(!JSON.stringify(result).includes('fixture-secret'));
+});
+
+test('GA quota failure does not suppress Search Console',async()=>{
+  const fixture = fixtureFetch(url=>url.endsWith(':batchRunReports') ? response({error:'fixture-provider-access-token'},429) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result.ga4.status,'error');
+  assert.equal(result.ga4.error.code,'quota');
+  assert.equal(result['search-console'].status,'ok');
+  assert.ok(!JSON.stringify(result).includes('fixture-provider-access-token'));
+});
+
+test('optional realtime, milestone and sitemap errors remain visible without losing core data',async()=>{
+  const fixture = fixtureFetch(url=>url.endsWith(':runRealtimeReport') || url.endsWith(':runReport') || url.endsWith('/sitemaps') ? response({},403) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result.ga4.status,'ok');
+  assert.equal(result.ga4.metrics.activeUsers,8);
+  assert.equal(result.ga4.metrics.realtimeUsers,null);
+  assert.equal(result.ga4.metadata.optionalErrors.milestones.code,'authorization');
+  assert.equal(result['search-console'].status,'ok');
+  assert.equal(result['search-console'].metadata.optionalErrors.sitemaps.code,'authorization');
+});
+
+test('partial Search Console error leaves missing totals null, not fabricated from top rows',async()=>{
+  const fixture = fixtureFetch((url,options)=>url.endsWith('/searchAnalytics/query') && JSON.parse(options.body).dimensions.length === 0 ? response({},503) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result['search-console'].status,'ok');
+  assert.equal(result['search-console'].metrics.clicks,null);
+  assert.equal(result['search-console'].metadata.optionalErrors.totals.status,503);
+  assert.equal(result.ga4.status,'ok');
+});
+
+test('empty successful reports differ from provider failures and missing metric cells',async()=>{
+  const fixture = fixtureFetch(url=>url.endsWith('/searchAnalytics/query') ? response({}) : url.endsWith(':runRealtimeReport') ? response({metricHeaders:[{name:'activeUsers'}]}) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result['search-console'].status,'empty');
+  assert.equal(result['search-console'].metrics.clicks,null);
+  assert.equal(result['search-console'].metadata.latestReportedDate,null);
+  assert.equal(result.ga4.metrics.realtimeUsers,0);
+});
+
+test('Pacific calendar date remains correct across DST, not fixed offset arithmetic',async()=>{
+  const first = await readGoogle(config(),{now:new Date('2026-03-09T07:30:00Z'),fetchImpl:fixtureFetch().fetchImpl});
+  const second = await readGoogle(config(),{now:new Date('2026-11-02T07:30:00Z'),fetchImpl:fixtureFetch().fetchImpl});
+  assert.equal(first['search-console'].range.end,'2026-03-06');
+  assert.equal(second['search-console'].range.end,'2026-10-29');
+});
+
+test('token is reused server-side while output and auth errors contain no secrets',async()=>{
+  const cfg = config();
+  const fixture = fixtureFetch();
+  await readGoogle(cfg,{now,fetchImpl:fixture.fetchImpl});
+  await readGoogle(cfg,{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(fixture.calls.filter(call=>call.url.endsWith('/token')).length,1);
+  const bad = fixtureFetch(url=>url.endsWith('/token') ? response({error:'fixture-refresh fixture-secret'},400) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:bad.fetchImpl});
+  assert.equal(result.ga4.status,'error');
+  assert.ok(!JSON.stringify(result).includes('fixture-secret'));
+  assert.ok(!JSON.stringify(result).includes('fixture-refresh'));
+});
+
+test('service-account JWT uses read-only scopes and standard WebCrypto signature',async()=>{
+  const pair = await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
+  const exported = await crypto.subtle.exportKey('pkcs8',pair.privateKey);
+  const pem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(exported).toString('base64')}\n-----END PRIVATE KEY-----`;
+  const fixture = fixtureFetch();
+  const result = await readGoogle({gaPropertyId:'123456789',searchConsoleSite:'sc-domain:example.com',googleServiceAccount:JSON.stringify({client_email:'fixture@example.iam.gserviceaccount.com',private_key:pem})},{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result.ga4.status,'ok');
+  const assertion = new URLSearchParams(fixture.calls.find(call=>call.url.endsWith('/token')).options.body).get('assertion');
+  const [header,claims,signature] = assertion.split('.');
+  const payload = JSON.parse(Buffer.from(claims,'base64url'));
+  assert.equal(payload.aud,'https://oauth2.googleapis.com/token');
+  assert.ok(payload.scope.includes('analytics.readonly'));
+  assert.ok(payload.scope.includes('webmasters.readonly'));
+  assert.equal(payload.exp-payload.iat,3600);
+  assert.equal(await crypto.subtle.verify('RSASSA-PKCS1-v1_5',pair.publicKey,Buffer.from(signature,'base64url'),new TextEncoder().encode(`${header}.${claims}`)),true);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE KEY'));
+});
+
+test('Search Console authorization failure leaves GA4 valid and reports safe error',async()=>{
+  const fixture = fixtureFetch(url=>url.includes('/webmasters/') ? response({error:'fixture-refresh'},403) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result.ga4.status,'ok');
+  assert.equal(result['search-console'].status,'error');
+  assert.equal(result['search-console'].error.code,'authorization');
+  assert.ok(!JSON.stringify(result).includes('fixture-refresh'));
+});
+
+test('invalid service-account JSON cannot fetch or expose configuration contents',async()=>{
+  const result = await readGoogle({googleServiceAccount:'fixture-private-invalid-json'},{now,fetchImpl:()=>{throw new Error('must not fetch');}});
+  assert.equal(result.ga4.status,'error');
+  assert.equal(result.ga4.error.code,'configuration');
+  assert.ok(!JSON.stringify(result).includes('fixture-private-invalid-json'));
+});
+
+
+test('seven-day traffic report includes today in the property timezone while search retains lag',async()=>{
+  const fixture = fixtureFetch();
+  const result = await readGoogle(config(),{now:new Date('2026-10-26T17:00:00Z'),days:7,fetchImpl:fixture.fetchImpl});
+  const batch = fixture.calls.find(call=>call.url.endsWith(':batchRunReports')).body;
+  assert.deepEqual(batch.requests[0].dateRanges,[{startDate:'6daysAgo',endDate:'today'}]);
+  assert.deepEqual(result.ga4.range,{start:'2026-10-21',end:'2026-10-27',timeZone:'Asia/Shanghai'});
+  assert.equal(result['search-console'].range.end,'2026-10-23');
+});
+
+
+test('official headerless empty realtime response means zero activity without a partial error',async()=>{
+  const fixture = fixtureFetch(url=>url.endsWith(':runRealtimeReport') ? response({propertyQuota:{tokensPerHour:{remaining:39121}},kind:'analyticsData#runRealtimeReport'}) : null);
+  const result = await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+  assert.equal(result.ga4.metrics.realtimeUsers,0);
+  assert.deepEqual(result.ga4.metadata.optionalErrors,{});
+  assert.equal(result.ga4.metrics.sessions,12);
+});
+
+test('malformed realtime successes remain errors rather than fabricated zero activity',async()=>{
+  const malformed = [
+    {},
+    {kind:'analyticsData#runReport'},
+    {kind:'analyticsData#runRealtimeReport',rows:[{metricValues:[{value:'2'}]}]},
+    {kind:'analyticsData#runRealtimeReport',rowCount:1},
+    {kind:'analyticsData#runRealtimeReport',metricHeaders:[]},
+    {metricHeaders:[{name:'activeUsers'}],rows:[{metricValues:[]}]},
+    {metricHeaders:[{name:'eventCount'}]},
+    {metricHeaders:[{name:'activeUsers'}],rows:{}},
+  ];
+  for (const body of malformed) {
+    const fixture=fixtureFetch(url=>url.endsWith(':runRealtimeReport') ? response(body) : null);
+    const result=await readGoogle(config(),{now,fetchImpl:fixture.fetchImpl});
+    assert.equal(result.ga4.status,'ok');
+    assert.equal(result.ga4.metrics.realtimeUsers,null);
+    assert.equal(result.ga4.metadata.optionalErrors.realtime.code,'response');
+  }
+});

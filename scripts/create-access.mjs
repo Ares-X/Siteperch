@@ -1,0 +1,11 @@
+import {randomBytes,createHash} from 'node:crypto';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+const folder=new URL('../.local/',import.meta.url);
+await mkdir(folder,{recursive:true,mode:0o700});
+const password=randomBytes(24).toString('base64url');
+const data={password,passwordSha256:createHash('sha256').update(password).digest('hex'),sessionSecret:randomBytes(32).toString('base64url')};
+const file=new URL('owner-access.json',folder);
+await writeFile(file,JSON.stringify(data,null,2)+'\n',{mode:0o600,flag:'wx'});
+console.log('Owner access created locally: '+fileURLToPath(file));
+console.log('Only the password hash and session signing key belong in hosting secrets. Keep this file private.');

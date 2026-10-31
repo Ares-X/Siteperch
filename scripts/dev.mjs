@@ -13,7 +13,7 @@ createServer(async(req,res)=>{
     const url=new URL(req.url,origin);
     if(url.pathname.startsWith('/api/')){
       const request=new Request(url,{method:req.method,headers:req.headers,...(['GET','HEAD'].includes(req.method)?{}:{body:Readable.toWeb(req),duplex:'half'})});
-      const response=await handle(request);res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));return;
+      const response=await handle(request,req.socket.remoteAddress);res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));return;
     }
     const path=resolve(root,'.'+decodeURIComponent(url.pathname==='/'?'/index.html':url.pathname));
     if(!path.startsWith(root.endsWith(sep)?root:root+sep)){res.writeHead(404);res.end();return;}

@@ -43,57 +43,72 @@ function reportRows(report) {
     metrics:Object.fromEntries(report.metricHeaders.map((header,index) => [header.name,numeric(row.metricValues?.[index]?.value)])),
   }));
 }
-function realtimeUserCount(report) {
-  const emptyRows = report?.rows === undefined || (Array.isArray(report.rows) && report.rows.length === 0);
-  const emptyCount = report?.rowCount === undefined || report.rowCount === 0;
-  // Observed official empty realtime response contains only kind and quota, without headers.
-  if (report?.kind === 'analyticsData#runRealtimeReport' && report.metricHeaders === undefined && report.dimensionHeaders === undefined && emptyRows && emptyCount) return 0;
-  if (!Array.isArray(report?.metricHeaders) || report.metricHeaders.length !== 1 || report.metricHeaders[0]?.name !== 'activeUsers' || (!emptyCount && emptyRows) || (report.rows !== undefined && !Array.isArray(report.rows))) {
+function officialEmptyRealtime(report) {
+  return report?.kind === 'analyticsData#runRealtimeReport' && report.metricHeaders === undefined && report.dimensionHeaders === undefined
+    && (report.rows === undefined || (Array.isArray(report.rows) && report.rows.length === 0)) && (report.rowCount === undefined || report.rowCount === 0);
+}
+function realtimeRows(report, metricName, dimensions) {
+  if (officialEmptyRealtime(report)) return [];
+  if (!Array.isArray(report?.metricHeaders) || report.metricHeaders.length !== 1 || report.metricHeaders[0]?.name !== metricName
+    || (report.rows !== undefined && !Array.isArray(report.rows)) || (report.rowCount > 0 && !report.rows?.length)
+    || (dimensions.length === 0 ? report.dimensionHeaders !== undefined && (!Array.isArray(report.dimensionHeaders) || report.dimensionHeaders.length !== 0)
+      : !Array.isArray(report.dimensionHeaders) || report.dimensionHeaders.length !== dimensions.length || dimensions.some((name,index)=>report.dimensionHeaders[index]?.name !== name))) {
     throw new ProviderError('response','Google 返回的实时报表结构不完整。');
   }
-  const rows = reportRows(report);
+  return reportRows(report);
+}
+function realtimeUserCount(report) {
+  const rows = realtimeRows(report,'activeUsers',[]);
   if (!rows.length) return 0;
-  const count = rows[0].metrics.activeUsers;
-  if (count === null) throw new ProviderError('response','Google 返回的实时人数无法读取。');
-  return count;
+  if (rows.length !== 1 || rows[0].metrics.activeUsers === null) throw new ProviderError('response','Google 返回的实时人数无法读取。');
+  return rows[0].metrics.activeUsers;
+}
+function realtimeEventRows(report) {
+  const events = realtimeRows(report,'eventCount',['eventName']).map(row=>({name:row.dimensions.eventName,count:row.metrics.eventCount}));
+  if (events.some(event=>!event.name || event.count === null)) throw new ProviderError('response','Google 返回的实时事件无法读取。');
+  return events;
 }
 const gaURL = id => `https://analyticsdata.googleapis.com/v1beta/properties/${encodeURIComponent(id)}`;
 const gaMetricNames = ['activeUsers','newUsers','sessions','screenPageViews','engagementRate'];
-// With two dateRanges GA4 stamps each row with a dateRangeIndex dimension; without
-// it every row belongs to the requested single range.
-const totalsRow = (report,index) => reportRows(report).find(row => (row.dimensions.dateRangeIndex ?? String(index)) === String(index));
+// Multiple ranges are identified by the official dateRange dimension, not row order.
+const totalsRow = (report,index) => reportRows(report).find(row => row.dimensions.dateRange === `date_range_${index}`);
 const metricsFrom = row => Object.fromEntries(gaMetricNames.map(name => [name === 'screenPageViews' ? 'pageViews' : name,row?.metrics[name] ?? null]));
 
 async function readGA(config, token, options) {
   const {days,now,fetchImpl} = options;
+  const milestonesEnabled = config.eventConfig?.preset === 'lonelysky';
   const post = (suffix,body) => requestJSON(`${gaURL(config.gaPropertyId)}:${suffix}`,{fetchImpl,method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const ranges = [{startDate:`${days-1}daysAgo`,endDate:'today'}];
   const report = (dimensions,metrics,extra={}) => ({dateRanges:ranges,dimensions:dimensions.map(name=>({name})),metrics:metrics.map(name=>({name})),returnPropertyQuota:true,...extra});
   const requests = [
-    // The comparison period rides in the same batch call: one extra dateRange
-    // instead of one extra request, so period deltas cost no extra quota.
+    // Both periods share one HTTP report; the wider query can still consume more tokens.
     report([],gaMetricNames,{dateRanges:[...ranges,{startDate:`${2*days-1}daysAgo`,endDate:`${days}daysAgo`}]}),
     report(['date'],['activeUsers','screenPageViews'],{orderBys:[{dimension:{dimensionName:'date'}}],limit:'28'}),
     report(['pagePath'],['screenPageViews'],{orderBys:[{metric:{metricName:'screenPageViews'},desc:true}],limit:'10'}),
     report(['sessionDefaultChannelGroup'],['sessions'],{orderBys:[{metric:{metricName:'sessions'},desc:true}],limit:'10'}),
-    report(['eventName'],['eventCount'],{orderBys:[{metric:{metricName:'eventCount'},desc:true}],limit:'100'}),
+    report(['eventName'],['eventCount','eventValue'],{orderBys:[{metric:{metricName:'eventCount'},desc:true}],limit:'100'}),
   ];
-  const [core,realtime,milestones] = await Promise.allSettled([
+  const [core,realtime,realtimeEventReport,milestones] = await Promise.allSettled([
     post('batchRunReports',{requests}),
+    // eventName cannot be combined with activeUsers in the realtime API. Keep the
+    // unique-user total and received-event report as separate fixed reads.
     post('runRealtimeReport',{metrics:[{name:'activeUsers'}],returnPropertyQuota:true}),
-    post('runReport',report(['customEvent:threshold_seconds'],['eventCount'],{dimensionFilter:{filter:{fieldName:'eventName',stringFilter:{matchType:'EXACT',value:'play_milestone'}}},limit:'100'})),
+    post('runRealtimeReport',{dimensions:[{name:'eventName'}],metrics:[{name:'eventCount'}],returnPropertyQuota:true}),
+    ...(milestonesEnabled ? [post('runReport',report(['customEvent:threshold_seconds'],['eventCount'],{dimensionFilter:{filter:{fieldName:'eventName',stringFilter:{matchType:'EXACT',value:'play_milestone'}}},limit:'100'}))] : []),
   ]);
   if (core.status === 'rejected') throw core.reason;
   const reports = core.value.reports;
   if (!Array.isArray(reports) || reports.length !== 5) throw new ProviderError('response','Google 返回的报表结构不完整。');
   const [total,daily,pages,channels,events] = reports;
-  const metrics = metricsFrom(totalsRow(total,0));
+  const current = totalsRow(total,0);
+  const metrics = metricsFrom(current);
   const optionalErrors = {};
-  let realtimeUsers = null, milestoneRows = [];
-  for (const [key,result] of [['realtime',realtime],['milestones',milestones]]) {
+  let realtimeUsers = null, realtimeEvents = [], milestoneRows = [];
+  for (const [key,result] of [['realtime',realtime],['realtimeEvents',realtimeEventReport],...(milestonesEnabled ? [['milestones',milestones]] : [])]) {
     try {
       if (result.status === 'rejected') throw result.reason;
       if (key === 'realtime') realtimeUsers = realtimeUserCount(result.value);
+      else if (key === 'realtimeEvents') realtimeEvents = realtimeEventRows(result.value);
       else milestoneRows = reportRows(result.value);
     } catch (error) { optionalErrors[key] = safeError(error); }
   }
@@ -102,14 +117,15 @@ async function readGA(config, token, options) {
   const range = dateRange(days,now,timeZone,0);
   const comparison = {window:{start:shiftDate(range.start,-days),end:shiftDate(range.end,-days),timeZone},metrics:metricsFrom(totalsRow(total,1))};
   return {
-    id:'ga4',name:'Google Analytics 4',status:reportRows(total).length ? 'ok' : 'empty',fetchedAt:now.toISOString(),range,comparison,metrics,
+    id:'ga4',name:'Google Analytics 4',status:current ? 'ok' : 'empty',fetchedAt:now.toISOString(),range,comparison,metrics,
     daily:reportRows(daily).map(row=>({date:row.dimensions.date.replace(/^(\d{4})(\d{2})(\d{2})$/,'$1-$2-$3'),activeUsers:row.metrics.activeUsers,pageViews:row.metrics.screenPageViews})),
     pages:reportRows(pages).map(row=>({path:row.dimensions.pagePath,views:row.metrics.screenPageViews})),
     channels:reportRows(channels).map(row=>({name:row.dimensions.sessionDefaultChannelGroup,sessions:row.metrics.sessions})),
-    events:reportRows(events).map(row=>({name:row.dimensions.eventName,count:row.metrics.eventCount})),
+    events:reportRows(events).map(row=>({name:row.dimensions.eventName,count:row.metrics.eventCount,value:row.metrics.eventValue ?? null})),
+    realtimeEvents,
     milestones:milestoneRows.map(row=>({seconds:numeric(row.dimensions['customEvent:threshold_seconds']),count:row.metrics.eventCount})).filter(row=>row.seconds !== null),
-    queries:[],note:`按媒体资源时区统计，包含今天；今日数据尚不完整，近两日数据仍可能调整。${Object.keys(optionalErrors).length ? '部分实时或游玩时长报表暂不可用，核心报表仍可读取。' : ''}`,
-    metadata:{reports:reports.map(report=>report.metadata || {}),propertyQuota:total.propertyQuota || null,optionalErrors,realtimeWindowMinutes:30,timezoneConfirmed:Boolean(total.metadata?.timeZone)},
+    queries:[],note:`按媒体资源时区统计，包含今天；今日数据尚不完整，近两日数据仍可能调整。${Object.keys(optionalErrors).length ? '部分附加报表暂不可用，核心报表仍可读取。' : ''}`,
+    metadata:{reports:reports.map(report=>report.metadata || {}),propertyQuota:total.propertyQuota || null,optionalErrors,realtimeStatus:optionalErrors.realtime ? 'error' : 'ok',realtimeEventsStatus:optionalErrors.realtimeEvents ? 'error' : 'ok',realtimeWindowMinutes:30,milestonesEnabled,timezoneConfirmed:Boolean(total.metadata?.timeZone)},
   };
 }
 
@@ -140,12 +156,28 @@ async function readSearch(config,token,{days,now,fetchImpl}) {
 
 export async function readGoogle(config,{days=7,now=new Date(),fetchImpl=fetch}={}) {
   days = Math.max(1,Math.min(28,Math.trunc(Number(days)) || 7));
+  const sources = {ga4:unconfigured('ga4','Google Analytics 4','尚未配置媒体资源。'),'search-console':unconfigured('search-console','Google Search Console','尚未配置站点资源。')};
+  const targets = [
+    ['ga4','Google Analytics 4',config.gaPropertyId,readGA],
+    ['search-console','Google Search Console',config.searchConsoleSite,readSearch],
+  ].filter(([, ,resource])=>resource);
+  if (!targets.length) return sources;
   const available = config.googleServiceAccount || (config.googleClientId && config.googleClientSecret && config.googleRefreshToken);
-  if (!available) return {ga4:unconfigured('ga4','Google Analytics 4','尚未配置 Google 只读授权。'),'search-console':unconfigured('search-console','Google Search Console','尚未配置 Google 只读授权。')};
+  if (!available) {
+    for (const [id,name] of targets) sources[id] = unconfigured(id,name,'尚未配置 Google 只读授权。');
+    return sources;
+  }
   let token;
   try { token = await accessToken(config,fetchImpl); }
-  catch(error) { return {ga4:providerFailure('ga4','Google Analytics 4',error,now),'search-console':providerFailure('search-console','Google Search Console',error,now)}; }
+  catch(error) {
+    for (const [id,name] of targets) sources[id] = providerFailure(id,name,error,now);
+    return sources;
+  }
   const options = {days,now,fetchImpl};
-  const results = await Promise.allSettled([config.gaPropertyId ? readGA(config,token,options) : Promise.resolve(unconfigured('ga4','Google Analytics 4','尚未配置媒体资源。')),config.searchConsoleSite ? readSearch(config,token,options) : Promise.resolve(unconfigured('search-console','Google Search Console','尚未配置站点资源。'))]);
-  return Object.fromEntries(results.map((result,index)=>[index ? 'search-console' : 'ga4',result.status === 'fulfilled' ? result.value : providerFailure(index ? 'search-console' : 'ga4',index ? 'Google Search Console' : 'Google Analytics 4',result.reason,now)]));
+  const results = await Promise.allSettled(targets.map(([, , ,read])=>read(config,token,options)));
+  results.forEach((result,index)=>{
+    const [id,name] = targets[index];
+    sources[id] = result.status === 'fulfilled' ? result.value : providerFailure(id,name,result.reason,now);
+  });
+  return sources;
 }

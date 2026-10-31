@@ -292,6 +292,10 @@ svg {
   margin-bottom:18px;
 }
 
+.metric-strip.compact {
+  grid-template-columns:repeat(2,minmax(0,1fr));
+}
+
 .metric {
   padding:0 23px;
   border-right:1px solid var(--line);
@@ -472,6 +476,10 @@ svg {
   line-height:1.65;
 }
 
+.report-quality {
+  overflow-wrap:anywhere;
+}
+
 .chart-controls {
   display:flex;
   gap:7px;
@@ -630,6 +638,22 @@ tr:last-child td {
   grid-template-columns:95px 1fr 37px;
   align-items:center;
   gap:10px;
+  font-size:12px;
+}
+
+.event-row>span:first-child {
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+
+.event-group-label {
+  font-size:12px;
+  margin:8px 0 0;
+}
+.event-value {
+  display:block;
+  margin-top:4px;
+  color:var(--muted);
   font-size:12px;
 }
 
@@ -1186,6 +1210,9 @@ tr:last-child td {
   }
   .metric:nth-child(-n+2) {
     border-bottom:1px solid var(--line);
+  }
+  .metric-strip.compact .metric {
+    border-bottom:0;
   }
   .metric-value {
     font-size:34px;

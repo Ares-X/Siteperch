@@ -62,10 +62,12 @@ function showLogin(message = '', configured = true) {
  document.querySelector('#retry-session')?.addEventListener('click', initialize);
 }
 function metricsStrip() {
- const ga = source('ga4');
- const metrics = [['活跃用户', 'activeUsers', false], ['页面浏览', 'pageViews', false], ['会话数', 'sessions', false], ['互动率', 'engagementRate', true]];
+ // GA4 preferred; fall back to any configured traffic source so the overview stays usable without Google.
+ const id = ['ga4', 'vercel', 'cloudflare'].find(candidate => usable(source(candidate))) || 'ga4';
+ const data = source(id), provider = providers[id].name;
+ const metrics = id === 'ga4' ? [['活跃用户', 'activeUsers', false], ['页面浏览', 'pageViews', false], ['会话数', 'sessions', false], ['互动率', 'engagementRate', true]] : id === 'vercel' ? [['独立访客', 'visitors', false], ['页面浏览', 'pageViews', false]] : [['访问次数', 'visits', false], ['页面浏览', 'pageViews', false]];
  const deltas = ['+12.6%', '+18.3%', '+9.7%', '-2.1%'];
- return `<section class="metric-strip" aria-label="Google Analytics 核心指标">${metrics.map(([name, key, rate], index) => `<div class="metric"><div class="metric-label">${name}</div><div class="metric-value">${rate ? percent(metric(ga, key)) : number(metric(ga, key))}</div><div class="metric-foot">${demo ? `<span class="${index === 3 ? 'negative' : 'positive'}">${index === 3 ? '▼' : '▲'} ${deltas[index]}</span>　较上 ${days} 天 · 示例` : `GA4 · ${escape(statusNames[ga.status] || '状态未知')}`}</div></div>`).join('')}</section>`;
+ return `<section class="metric-strip" aria-label="${escape(provider)} 核心指标">${metrics.map(([name, key, rate], index) => `<div class="metric"><div class="metric-label">${name}</div><div class="metric-value">${rate ? percent(metric(data, key)) : number(metric(data, key))}</div><div class="metric-foot">${demo && id === 'ga4' ? `<span class="${index === 3 ? 'negative' : 'positive'}">${index === 3 ? '▼' : '▲'} ${deltas[index]}</span>　较上 ${days} 天 · 示例` : `${escape(provider)} · ${escape(statusNames[data.status] || '状态未知')}`}</div></div>`).join('')}</section>`;
 }
 function chart(data, series) {
  const reported = usable(data) ? (Array.isArray(data.daily) ? data.daily : []).filter(row => /^\d{4}-\d{2}-\d{2}$/.test(row.date)).slice(0, 90) : [];

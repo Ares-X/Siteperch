@@ -1,5 +1,6 @@
 import {authenticated,authConfigured,passwordMatches,sessionCookie,clearSession,sameOrigin} from './auth.js';
 import {createDashboard} from './dashboard.js';
+import {clientKey,createLoginThrottle} from './throttle.js';
 const SECURITY_HEADERS={
   'Cache-Control':'private, no-store', 'Content-Type':'application/json; charset=utf-8',
   'X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex, nofollow, noarchive',
@@ -8,6 +9,7 @@ const SECURITY_HEADERS={
 function json(value,status=200,headers={}) { return new Response(JSON.stringify(value),{status,headers:{...SECURITY_HEADERS,...headers}}); }
 export function createHandler(env, {now=()=>new Date(),dashboard,fetchImpl} = {}) {
   const reports=dashboard || createDashboard(env,{now,fetchImpl});
+  const loginThrottle=createLoginThrottle({now});
   return async function handle(request) {
     const url=new URL(request.url), path=url.pathname.replace(/\/$/,'');
     if (!['/api/session','/api/login','/api/logout','/api/summary'].includes(path)) return json({error:'找不到此接口。'},404);
@@ -19,10 +21,13 @@ export function createHandler(env, {now=()=>new Date(),dashboard,fetchImpl} = {}
     if (request.method==='POST' && !sameOrigin(request,env)) return json({error:'请求来源不匹配。'},403);
     if (path==='/api/login') {
       if (!request.headers.get('content-type')?.startsWith('application/json')) return json({error:'请使用 JSON 提交口令。'},415);
+      const key=clientKey(request), throttle=loginThrottle.check(key);
+      if (!throttle.allowed) return json({error:'尝试过于频繁，请稍后再试。'},429,{'Retry-After':String(throttle.retryAfterSeconds)});
       let body;
       try { const text=await request.text(); if(text.length>2048)return json({error:'请求过大。'},413); body=JSON.parse(text); }
       catch { return json({error:'无法读取登录请求。'},400); }
-      if(!await passwordMatches(body?.password,env)) return json({error:'访问口令不正确。'},401);
+      if(!await passwordMatches(body?.password,env)) { loginThrottle.recordFailure(key); return json({error:'访问口令不正确。'},401); }
+      loginThrottle.recordSuccess(key);
       return json({authenticated:true},200,{'Set-Cookie':await sessionCookie(request,env,now())});
     }
     if (!await authenticated(request,env,now())) return json({error:'请先登录。'},401);

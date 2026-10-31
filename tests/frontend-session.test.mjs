@@ -68,3 +68,36 @@ test('failed logout allows a fresh refresh and retry; its old pending load remai
   await ui.logout();
   assert.match(ui.app.innerHTML,/访问你的观测台/);
 });
+
+test('overview metrics fall back to a configured traffic source when GA4 is absent',async()=>{
+  const elements=new Map();
+  const app={innerHTML:'',querySelectorAll:()=>[]};
+  const element=selector=>{
+    if(!elements.has(selector)) elements.set(selector,{disabled:false,listeners:{},addEventListener(event,handler){this.listeners[event]=handler;},focus(){}});
+    return elements.get(selector);
+  };
+  const context=vm.createContext({
+    URL,Intl,Date,console,
+    location:{href:'https://private.example/',hash:'',pathname:'/',search:''},
+    history:{replaceState(){}},window:{addEventListener(){}},
+    document:{querySelector(selector){
+      if(selector==='#app') return app;
+      if(['#logout','#refresh'].includes(selector)) return element(selector);
+      return null;
+    }},
+    async fetch(url){
+      if(url==='/api/session') return response({configured:true,authenticated:true});
+      if(url.startsWith('/api/summary')) return response({site:'example.com',days:7,sources:{
+        ga4:{id:'ga4',status:'unconfigured'},
+        vercel:{id:'vercel',status:'ok',metrics:{visitors:42,pageViews:99}},
+      }});
+      throw Error(`Unexpected request ${url}`);
+    },
+  });
+  vm.runInContext(code,context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(app.innerHTML,/独立访客/);
+  assert.match(app.innerHTML,/Vercel · 已同步/);
+  assert.match(app.innerHTML,/aria-label="Vercel 核心指标"/);
+  assert.doesNotMatch(app.innerHTML,/GA4 · 已同步/);
+});

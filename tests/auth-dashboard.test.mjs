@@ -10,6 +10,7 @@ const env={DASHBOARD_PASSWORD_SHA256:createHash('sha256').update(password).diges
 const now=new Date('2026-10-27T08:00:00Z');
 const request=(path,options={})=>new Request('https://observatory.example/api/'+path,options);
 const login=(origin='https://observatory.example',value=password)=>request('login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({password:value})});
+const loginFrom=(ip,value=password,origin='https://observatory.example')=>request('login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json','x-forwarded-for':ip},body:JSON.stringify({password:value})});
 async function ownerCookie(){return (await sessionCookie(request('session'),env,now)).split(';')[0];}
 
 test('unconfigured and unauthenticated backends never fetch private provider data',async()=>{
@@ -60,10 +61,43 @@ test('owner-selected passwords below 16 characters match exactly and rotate exis
   const changed={...env,DASHBOARD_PASSWORD_SHA256:createHash('sha256').update(chosen).digest('hex')};
   const handler=createHandler(changed,{now:()=>now});
   assert.equal((await handler(login(env.APP_ORIGIN,chosen))).status,200);
-  for (const value of [password,'',null,chosen+' ',chosen.toLowerCase(),'x'.repeat(257)]) {
-    assert.equal((await handler(login(env.APP_ORIGIN,value))).status,401);
+  for (const [index,value] of [password,'',null,chosen+' ',chosen.toLowerCase(),'x'.repeat(257)].entries()) {
+    // Distinct client keys keep this test about password matching, not throttling.
+    assert.equal((await handler(loginFrom(`198.51.100.${index}`,value))).status,401);
   }
   assert.equal(await authenticated(request('session',{headers:{Cookie:await ownerCookie()}}),changed,now),false);
+});
+
+test('repeated login failures lock that client with exponential backoff and Retry-After',async()=>{
+  let time=new Date(now);
+  const handler=createHandler(env,{now:()=>time});
+  for (let attempt=0;attempt<5;attempt++) assert.equal((await handler(loginFrom('203.0.113.9','wrong'))).status,401);
+  const locked=await handler(loginFrom('203.0.113.9',password));
+  assert.equal(locked.status,429);assert.equal((await locked.json()).configured,undefined);
+  const retryAfter=Number(locked.headers.get('retry-after'));
+  assert.ok(Number.isInteger(retryAfter)&&retryAfter>=1&&retryAfter<=30);
+  assert.equal((await handler(loginFrom('203.0.113.8','wrong'))).status,401);
+  time=new Date(now.getTime()+31000);
+  assert.equal((await handler(loginFrom('203.0.113.9',password))).status,200);
+});
+
+test('a successful login resets that client counter but not other clients',async()=>{
+  const handler=createHandler(env,{now:()=>new Date(now)});
+  for (let attempt=0;attempt<4;attempt++) assert.equal((await handler(loginFrom('203.0.113.10','wrong'))).status,401);
+  assert.equal((await handler(loginFrom('203.0.113.10'))).status,200);
+  for (let attempt=0;attempt<4;attempt++) assert.equal((await handler(loginFrom('203.0.113.10','wrong'))).status,401);
+  assert.equal((await handler(loginFrom('203.0.113.10','wrong'))).status,401);
+  assert.equal((await handler(loginFrom('203.0.113.10','wrong'))).status,429);
+});
+
+test('rotating client keys cannot outpace the global failure cap',async()=>{
+  let time=new Date(now);
+  const handler=createHandler(env,{now:()=>time});
+  for (let attempt=0;attempt<20;attempt++) assert.equal((await handler(loginFrom(`198.51.100.${attempt}`,'wrong'))).status,401);
+  const locked=await handler(loginFrom('198.51.100.77',password));
+  assert.equal(locked.status,429);assert.ok(Number(locked.headers.get('retry-after'))>=1);
+  time=new Date(now.getTime()+31000);
+  assert.equal((await handler(loginFrom('198.51.100.77',password))).status,200);
 });
 
 test('forged, expired and password-rotated sessions are rejected',async()=>{

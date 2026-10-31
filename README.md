@@ -59,7 +59,7 @@ npm run check
 
 ## 私有访问与额度
 
-应用使用签名 `HttpOnly; Secure; SameSite=Strict` 会话，有效 8 小时；POST 校验同源 Origin，修改口令摘要或签名密钥使旧会话失效。口令不存入浏览器 localStorage，私有 API 返回 `private, no-store`，不开放跨域。
+应用使用签名 `HttpOnly; Secure; SameSite=Strict` 会话，有效 8 小时；POST 校验同源 Origin，修改口令摘要或签名密钥使旧会话失效。口令不存入浏览器 localStorage，私有 API 返回 `private, no-store`，不开放跨域。登录接口在实例内做尽力限流：同一来源连续失败 5 次起触发指数退避（429 与 `Retry-After`，最长 15 分钟），跨来源失败总量另有全局上限；计数只存在于热实例，冷启动和多实例不共享，不能替代 CDN 层面的防护。
 
 现有私人部署另有 Vercel 项目级 CDN Basic 认证，在进入 Function 前拒绝不匹配的请求。这个规则保存在平台私有 Routing Rules 中，源码不包含凭据；新建 Vercel 项目时需要单独配置。复用旧项目迁移仓库时保留并复核该规则。页面“退出”只清除应用会话，浏览器可能继续缓存 Basic 凭据。
 
